@@ -1,0 +1,14 @@
+{
+  "name": "facit-edge-tts-proxy",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "edge-tts-universal": "^1.4.0"
+  }
+}

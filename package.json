@@ -1,0 +1,20 @@
+{
+  "name": "facit-web",
+  "private": true,
+  "scripts": {
+    "build:css": "tailwindcss -c tailwind.config.js -i ./src/tailwind.css -o ./public/tailwind.css --minify",
+    "copy:vendor": "node ./scripts/copy-vendor.mjs",
+    "build:public": "npm run build:css && npm run copy:vendor"
+  },
+  "devDependencies": {
+    "@fortawesome/fontawesome-free": "^6.5.1",
+    "autoprefixer": "^10.4.20",
+    "chart.js": "^4.4.1",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.17"
+  },
+  "dependencies": {
+    "edge-tts-universal": "^1.4.0",
+    "puppeteer": "^25.2.1"
+  }
+}
