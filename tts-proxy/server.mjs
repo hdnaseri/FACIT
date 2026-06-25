@@ -7,7 +7,7 @@ const EDGE_TTS_OUTPUT_FORMAT = "audio-24khz-96kbitrate-mono-mp3";
 const HIGH_QUALITY_TTS_VOICES = {
   "da-DK": {
     languageCode: "da-DK",
-    name: "da-DK-ChristelNeural",
+    name: "da-DK-JeppeNeural",
   },
   "en-US": {
     languageCode: "en-US",
@@ -33,12 +33,6 @@ function sendJson(res, statusCode, payload) {
   applyCors(res);
   res.writeHead(statusCode, {"Content-Type": "application/json; charset=utf-8"});
   res.end(JSON.stringify(payload));
-}
-
-function sendText(res, statusCode, body) {
-  applyCors(res);
-  res.writeHead(statusCode, {"Content-Type": "text/plain; charset=utf-8"});
-  res.end(body);
 }
 
 function normalizeHighQualityVoice(languageCode) {
@@ -151,16 +145,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/health") {
-    sendText(res, 200, "OK");
-    return;
-  }
-
-  if (req.method === "GET" && url.pathname === "/") {
-    sendJson(res, 200, {
-      ok: true,
-      service: "facit-edge-tts-proxy",
-      routes: ["/health", "/generatePronunciationAudio"],
-    });
+    sendJson(res, 200, {ok: true, service: "facit-edge-tts-proxy"});
     return;
   }
 
