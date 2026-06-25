@@ -5383,7 +5383,9 @@ Conversation History:
             'en-US': 'en-US-EmmaMultilingualNeural',
             'en-GB': 'en-GB-SoniaNeural'
         };
-        const PRONUNCIATION_FUNCTION_BASE_URL = `https://us-central1-facit-1941b.cloudfunctions.net/generatePronunciationAudio`;
+        const DEFAULT_TTS_PROXY_URL = 'https://tts-proxy-05t2.onrender.com';
+        const PRONUNCIATION_ENDPOINT_URL = `${DEFAULT_TTS_PROXY_URL}/generatePronunciationAudio`;
+        const PRONUNCIATION_CACHE_NAME = 'facit-pronunciation-audio-v1';
         const SILENT_AUDIO_DATA_URI = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
         let pronunciationAudioContext = null;
         let activePronunciationSource = null;
@@ -5429,36 +5431,56 @@ Conversation History:
             return EDGE_TTS_VOICE_MAP['en-US'];
         }
 
-        function getPronunciationFunctionUrls() {
-            const currentOrigin = String(window.location?.origin || '').trim();
-            const urls = [];
-            const configuredProxyUrls = [];
-            try {
-                const runtimeConfigUrl = String(window.FACIT_TTS_PROXY_URL || '').trim();
-                if (runtimeConfigUrl) configuredProxyUrls.push(runtimeConfigUrl);
-            } catch (e) {}
-            try {
-                const savedProxyUrl = String(localStorage.getItem('facit_tts_proxy_url') || '').trim();
-                if (savedProxyUrl) configuredProxyUrls.push(savedProxyUrl);
-            } catch (e) {}
+        function getPronunciationCacheKey(text, lang) {
+            const speakText = cleanSpeakTextForLanguage(text, lang);
+            return `${String(lang || '').trim()}::${speakText.toLowerCase()}`;
+        }
 
-            for (const configuredUrl of configuredProxyUrls) {
-                if (!configuredUrl) continue;
-                if (/\/generatePronunciationAudio\/?$/i.test(configuredUrl)) {
-                    urls.push(configuredUrl.replace(/\/+$/, ''));
-                    continue;
-                }
-                urls.push(`${configuredUrl.replace(/\/+$/, '')}/generatePronunciationAudio`);
-            }
+        function getPronunciationCacheRequest(text, lang) {
+            const key = encodeURIComponent(getPronunciationCacheKey(text, lang));
+            return new Request(`${DEFAULT_TTS_PROXY_URL}/__cache__/pronunciation/${key}.mp3`, {
+                method: 'GET'
+            });
+        }
 
-            if (currentOrigin) {
-                urls.push(`${currentOrigin}/api/generatePronunciationAudio`);
+        async function getCachedPronunciationAudio(text, lang) {
+            if (!('caches' in window)) return null;
+            try {
+                const cache = await caches.open(PRONUNCIATION_CACHE_NAME);
+                const response = await cache.match(getPronunciationCacheRequest(text, lang));
+                if (!response?.ok) return null;
+                const audioBlob = await response.blob();
+                if (!audioBlob.size) return null;
+                return {
+                    audioBlob,
+                    audioProvider: String(response.headers.get('X-TTS-Provider') || 'edge-tts').trim(),
+                    audioVoiceName: String(response.headers.get('X-TTS-Voice') || getEdgeTtsVoiceName(lang)).trim(),
+                    audioLanguageCode: String(response.headers.get('X-TTS-Language') || lang || '').trim(),
+                    audioUpdatedAt: String(response.headers.get('X-TTS-Cached-At') || '').trim()
+                };
+            } catch (error) {
+                console.error('getCachedPronunciationAudio error:', error);
+                return null;
             }
-            if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(currentOrigin)) {
-                urls.push(`http://127.0.0.1:5001/facit-1941b/us-central1/generatePronunciationAudio`);
+        }
+
+        async function storeCachedPronunciationAudio(text, lang, pronunciation) {
+            if (!('caches' in window) || !(pronunciation?.audioBlob instanceof Blob) || !pronunciation.audioBlob.size) return;
+            try {
+                const cache = await caches.open(PRONUNCIATION_CACHE_NAME);
+                const response = new Response(pronunciation.audioBlob, {
+                    headers: {
+                        'Content-Type': 'audio/mpeg',
+                        'X-TTS-Provider': String(pronunciation.audioProvider || 'edge-tts'),
+                        'X-TTS-Voice': String(pronunciation.audioVoiceName || getEdgeTtsVoiceName(lang)),
+                        'X-TTS-Language': String(pronunciation.audioLanguageCode || lang || ''),
+                        'X-TTS-Cached-At': String(pronunciation.audioUpdatedAt || new Date().toISOString())
+                    }
+                });
+                await cache.put(getPronunciationCacheRequest(text, lang), response);
+            } catch (error) {
+                console.error('storeCachedPronunciationAudio error:', error);
             }
-            urls.push(PRONUNCIATION_FUNCTION_BASE_URL);
-            return [...new Set(urls.filter(Boolean))];
         }
 
         function getPronunciationAudioElement() {
@@ -5659,87 +5681,54 @@ Conversation History:
         }
 
         async function requestHighQualityPronunciationAudio(text, lang) {
-            if (!navigator.onLine) return null;
             const speakText = cleanSpeakTextForLanguage(text, lang);
             if (!isEligibleForHighQualityPronunciation(speakText, lang)) return null;
 
             try {
-                const voiceName = getEdgeTtsVoiceName(lang);
-                const user = window.auth?.currentUser || currentUser;
-                const idToken = user && typeof user.getIdToken === 'function' ?
-                    await user.getIdToken().catch(() => null) :
-                    null;
-                let response = null;
-                for (const endpointUrl of getPronunciationFunctionUrls()) {
-                    try {
-                        const headers = {
-                            'Content-Type': 'application/json'
-                        };
-                        if (idToken) headers.Authorization = `Bearer ${idToken}`;
-                        response = await fetch(endpointUrl, {
-                            method: 'POST',
-                            headers,
-                            body: JSON.stringify({
-                                term: speakText,
-                                languageCode: lang
-                            })
-                        });
-                    } catch (error) {
-                        console.error('Pronunciation function network error:', endpointUrl, error);
-                        response = null;
-                        continue;
-                    }
+                const cachedPronunciation = await getCachedPronunciationAudio(speakText, lang);
+                if (cachedPronunciation?.audioBlob) {
+                    return cachedPronunciation;
+                }
+                if (!navigator.onLine) return null;
 
-                    if (response?.ok) break;
-                    const errorText = await response.text().catch(() => '');
-                    console.error('Pronunciation function failed:', endpointUrl, response?.status, errorText);
+                const voiceName = getEdgeTtsVoiceName(lang);
+                let response = null;
+                try {
+                    response = await fetch(PRONUNCIATION_ENDPOINT_URL, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            term: speakText,
+                            languageCode: lang
+                        })
+                    });
+                } catch (error) {
+                    console.error('Pronunciation function network error:', PRONUNCIATION_ENDPOINT_URL, error);
                     response = null;
                 }
-                if (!response?.ok) return null;
+                if (!response?.ok) {
+                    const errorText = await response?.text().catch(() => '') || '';
+                    console.error('Pronunciation function failed:', PRONUNCIATION_ENDPOINT_URL, response?.status, errorText);
+                    return null;
+                }
 
                 const audioBlob = await response.blob();
                 if (!audioBlob.size) return null;
-                return {
+                const pronunciation = {
                     audioBlob,
                     audioProvider: String(response.headers.get('X-TTS-Provider') || 'edge-tts').trim(),
                     audioVoiceName: String(response.headers.get('X-TTS-Voice') || voiceName).trim(),
                     audioLanguageCode: String(response.headers.get('X-TTS-Language') || lang || '').trim(),
                     audioUpdatedAt: new Date().toISOString()
                 };
+                storeCachedPronunciationAudio(speakText, lang, pronunciation).catch(() => {});
+                return pronunciation;
             } catch (error) {
                 console.error('requestHighQualityPronunciationAudio error:', error);
                 return null;
             }
-        }
-
-        async function fallbackToSpeechSynthesis(text, lang) {
-            return new Promise((resolve) => {
-                if (!window.speechSynthesis) {
-                    resolve(false);
-                    return;
-                }
-                const utterance = new SpeechSynthesisUtterance(text);
-                utterance.lang = lang || 'en-US';
-                
-                // Try to find a good voice
-                const voices = window.speechSynthesis.getVoices();
-                if (voices && voices.length > 0) {
-                    // Try to find a voice matching the language exactly
-                    let voice = voices.find(v => v.lang === lang || v.lang.replace('_', '-') === lang);
-                    // If not found, try to find a voice matching the primary language tag
-                    if (!voice) {
-                        const primaryLang = (lang || 'en').split('-')[0];
-                        voice = voices.find(v => v.lang.startsWith(primaryLang));
-                    }
-                    if (voice) {
-                        utterance.voice = voice;
-                    }
-                }
-                
-                utterance.onend = () => resolve(true);
-                utterance.onerror = () => resolve(false);
-                window.speechSynthesis.speak(utterance);
-            });
         }
 
         async function speak(text, lang, btn = null, options = {}) {
@@ -5747,7 +5736,7 @@ Conversation History:
             try {
                 ensurePronunciationUnlockListeners();
                 await unlockPronunciationPlayback().catch(() => {});
-                const inFlightKey = `${String(lang || '').trim()}::${cleanSpeakTextForLanguage(text, lang).toLowerCase()}`;
+                const inFlightKey = getPronunciationCacheKey(text, lang);
                 let requestPromise = highQualityPronunciationInFlight.get(inFlightKey);
                 if (!requestPromise) {
                     requestPromise = requestHighQualityPronunciationAudio(text, lang)

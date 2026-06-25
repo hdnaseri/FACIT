@@ -19,6 +19,8 @@ npm start
 ## مسیرها
 
 - `GET /health`
+- پاسخ این مسیر متن ساده `OK` است.
+- `GET /`
 - `POST /generatePronunciationAudio`
 
 نمونه بدنه درخواست:
@@ -32,18 +34,6 @@ npm start
 
 ## اتصال اپ
 
-بعد از deploy این سرویس روی هاستی مثل `Render` یا `Railway`، در مرورگر این مقدار را ست کن:
+در نسخه فعلی اپ، مسیر تلفظ به‌صورت مستقیم به endpoint دیپلوی‌شده‌ی Render وصل می‌شود و دیگر از Firebase یا مسیرهای جایگزین برای TTS استفاده نمی‌کند.
 
-```js
-localStorage.setItem('facit_tts_proxy_url', 'https://YOUR-TTS-HOST');
-```
-
-یا قبل از لود شدن اپ این متغیر را تعریف کن:
-
-```html
-<script>
-  window.FACIT_TTS_PROXY_URL = 'https://YOUR-TTS-HOST';
-</script>
-```
-
-اپ به‌طور خودکار مسیر `generatePronunciationAudio` را به این آدرس اضافه می‌کند.
+اگر بعداً هاست TTS عوض شد، باید ثابت endpoint را در [index.html](file:///f:/FACIT/public/index.html) به‌روزرسانی کنی.

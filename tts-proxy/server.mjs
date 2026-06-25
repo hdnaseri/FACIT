@@ -35,6 +35,12 @@ function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload));
 }
 
+function sendText(res, statusCode, body) {
+  applyCors(res);
+  res.writeHead(statusCode, {"Content-Type": "text/plain; charset=utf-8"});
+  res.end(body);
+}
+
 function normalizeHighQualityVoice(languageCode) {
   const normalized = String(languageCode || "").trim();
   if (HIGH_QUALITY_TTS_VOICES[normalized]) {
@@ -145,7 +151,16 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/health") {
-    sendJson(res, 200, {ok: true, service: "facit-edge-tts-proxy"});
+    sendText(res, 200, "OK");
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/") {
+    sendJson(res, 200, {
+      ok: true,
+      service: "facit-edge-tts-proxy",
+      routes: ["/health", "/generatePronunciationAudio"],
+    });
     return;
   }
 
