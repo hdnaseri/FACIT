@@ -1,6 +1,18 @@
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
+    <script>
+        window.addEventListener('error', function(e) {
+            const msg = "Init Error: " + (e.error || e.message);
+            console.error(msg);
+            const splashScreen = document.getElementById('splash-screen');
+            if (splashScreen) {
+                splashScreen.innerHTML = '<div style="color:red; text-align:center; padding: 20px; font-family:sans-serif;"><h2 style="font-size:24px; font-weight:bold; margin-bottom:10px;">خطا در بارگذاری برنامه</h2><p style="font-size:14px; margin-bottom:15px; direction:rtl;">' + msg + '</p></div>';
+            } else {
+                alert(msg);
+            }
+        });
+    </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>FACIT</title>
