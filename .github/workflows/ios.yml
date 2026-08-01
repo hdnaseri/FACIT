@@ -38,8 +38,8 @@ jobs:
       run: |
         cd derived_data/Build/Products/Release-iphoneos
         mkdir Payload
-        cp -r App.app Payload/
-        zip -r FACIT.ipa Payload
+        mv App.app Payload/
+        zip -qry FACIT.ipa Payload
 
     - name: Upload IPA Artifact
       uses: actions/upload-artifact@v4
