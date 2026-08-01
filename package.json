@@ -14,6 +14,9 @@
     "tailwindcss": "^3.4.17"
   },
   "dependencies": {
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/ios": "^8.5.0",
     "edge-tts-universal": "^1.4.0",
     "puppeteer": "^25.2.1"
   }

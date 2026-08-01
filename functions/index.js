@@ -158,14 +158,16 @@ exports.callGeminiAPI = functions.https.onRequest(async (req, res) => {
 
   // Try multiple models in order (fallback chain)
   // Strongest to weakest
+  // NOTE: gemini-2.0-flash, gemini-1.5-* were deprecated/shut down by Google
+  // in June 2026. Updated July 2026 to use current generation models.
+  // Only confirmed active models are listed here.
   const modelsToTry = userSpecifiedModel ?
     [userSpecifiedModel] : // If user specified a model, only try that
     [
-      "gemini-3-pro-preview", // Strongest
-      "gemini-3-flash-preview", // Fast & strong
-      "gemini-2.5-pro", // Strong
-      "gemini-2.5-flash", // Fast
-      "gemini-1.5-flash", // Legacy fallback
+      "gemini-3.6-flash", // Newest GA flash (primary)
+      "gemini-3.5-flash", // Previous GA flash
+      "gemini-2.5-flash", // Legacy fallback (retiring Oct 2026)
+      "gemini-3.1-pro-preview", // Flagship Pro (last resort)
     ];
 
   let lastError = null;

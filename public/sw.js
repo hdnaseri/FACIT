@@ -1,5 +1,5 @@
 
-const CACHE_NAME = 'facit-cache-v10.0.2';
+const CACHE_NAME = 'facit-cache-v12.9.9';
 const DEBUG = false;
 const URLS_TO_CACHE = [
   '/',
@@ -189,3 +189,4 @@ self.addEventListener('message', event => {
     self.skipWaiting();
   }
 });
+

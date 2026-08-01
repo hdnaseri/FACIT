@@ -40,21 +40,50 @@ const ERROR_MESSAGES = {
     [ERROR_TYPES.MODEL_ERROR]: 'مدل‌های درخواست شده در دسترس نیستند.'
 };
 
-// Model definitions (strongest to weakest)
-const MODELS_STRONG_TO_WEAK = ['gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-2.5-flash'];
-const MODELS_WEAK_TO_STRONG = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-3-flash-preview', 'gemini-3-pro-preview'];
+// Model definitions (strongest to weakest and weakest to strongest)
+// Updated July 2026: gemini-2.0-flash/1.5-* shut down June 2026.
+// gemini-3.x is the current generation. gemini-2.5-* is legacy (retiring Oct 2026).
+const MODELS_STRONG_TO_WEAK = [
+    'gemini-3.1-pro-preview',   // Flagship reasoning / complex analysis
+    'gemini-3.6-flash',         // Newest GA flash (Jul 21 2026)
+    'gemini-3.5-flash',         // Previous GA flash
+    'gemini-2.5-pro',           // Legacy pro (retiring Oct 2026)
+    'gemini-2.5-flash',         // Legacy flash (retiring Oct 2026)
+    'gemini-3.5-flash-lite',    // Cheapest / high-volume automation
+];
+const MODELS_WEAK_TO_STRONG = [
+    'gemini-3.5-flash-lite',    // Cheapest / high-volume
+    'gemini-2.5-flash',         // Legacy flash
+    'gemini-3.5-flash',         // Previous GA flash
+    'gemini-3.6-flash',         // Newest GA flash
+    'gemini-2.5-pro',           // Legacy pro
+    'gemini-3.1-pro-preview',   // Flagship reasoning
+];
 
 const SUPPORTED_MODELS = new Set([
     ...MODELS_STRONG_TO_WEAK,
-    ...MODELS_WEAK_TO_STRONG,
-    'gemini-1.5-flash'
+    ...MODELS_WEAK_TO_STRONG
 ]);
 
-const DEFAULT_DISABLED_MODELS = ['gemini-2.5-pro', 'gemini-3-pro-preview', 'gemini-3-flash-preview'];
+// Pro models disabled by default (lower free-tier quota)
+const DEFAULT_DISABLED_MODELS = ['gemini-3.1-pro-preview', 'gemini-2.5-pro'];
 
 function normalizeModelId(modelId) {
     if (!modelId) return null;
-    return SUPPORTED_MODELS.has(modelId) ? modelId : null;
+    // Already supported → pass through
+    if (SUPPORTED_MODELS.has(modelId)) return modelId;
+    // Deprecated / shutdown models → nearest active equivalent
+    if (modelId === 'gemini-2.0-flash') return 'gemini-3.6-flash';
+    if (modelId === 'gemini-2.0-flash-thinking-exp') return 'gemini-3.6-flash';
+    if (modelId === 'gemini-2.0-pro-exp') return 'gemini-3.1-pro-preview';
+    if (modelId === 'gemini-1.5-pro') return 'gemini-2.5-pro';
+    if (modelId === 'gemini-1.5-flash') return 'gemini-3.6-flash';
+    // Alternate names for current models
+    if (modelId === 'gemini-3-flash-preview') return 'gemini-3.5-flash';
+    if (modelId === 'gemini-3-pro-preview') return 'gemini-3.1-pro-preview';
+    // 'hybrid' = Auto mode (not a real model)
+    if (modelId === 'hybrid') return 'hybrid';
+    return null;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -67,7 +96,7 @@ let apiKeyStatsRefreshPromise = null;
 
 const KEY_RUNTIME_STATE_STORAGE_KEY = 'facit_gemini_key_runtime_state_v1';
 const KEY_SELECTOR_META_STORAGE_KEY = 'facit_gemini_key_selector_meta_v1';
-const MODEL_RUNTIME_STATE_STORAGE_KEY = 'facit_gemini_model_runtime_state_v1';
+const MODEL_RUNTIME_STATE_STORAGE_KEY = 'facit_gemini_model_runtime_state_v2';
 let keyRuntimeState = {};
 let keySelectorMeta = { rr: 0 };
 let modelRuntimeState = {};
@@ -79,6 +108,30 @@ try {
 } catch {
     keyRuntimeState = {};
 }
+
+// Clean up expired runtime states on load so keys with stale cooldowns
+// (e.g. from yesterday's daily-quota 429) are immediately usable again.
+try {
+    const _loadNow = Date.now();
+    let _stateChanged = false;
+    for (const _stateId of Object.keys(keyRuntimeState)) {
+        const _st = keyRuntimeState[_stateId];
+        if (_st.disabledUntil && _loadNow >= _st.disabledUntil) {
+            delete _st.disabledUntil;
+            _stateChanged = true;
+        }
+        if (_st.cooldownUntil && _loadNow >= _st.cooldownUntil) {
+            delete _st.cooldownUntil;
+            delete _st.dailyQuotaExceeded;
+            _st.consecutiveFails = 0;
+            _st.consecutive429 = 0;
+            _stateChanged = true;
+        }
+    }
+    if (_stateChanged) {
+        localStorage.setItem(KEY_RUNTIME_STATE_STORAGE_KEY, JSON.stringify(keyRuntimeState));
+    }
+} catch {}
 
 try {
     const savedMeta = localStorage.getItem(KEY_SELECTOR_META_STORAGE_KEY);
@@ -119,6 +172,132 @@ function getKeyState(keyId) {
     if (!keyId) return {};
     if (!keyRuntimeState[keyId]) keyRuntimeState[keyId] = {};
     return keyRuntimeState[keyId];
+}
+
+// BUGFIX: runtime state (disabledUntil after an auth error, cooldownUntil after
+// rate limits/failures, consecutiveFails, etc.) used to be keyed purely by
+// keyObj.id — the Firestore FIELD NAME (e.g. "gemini_key_1"), not the actual key
+// VALUE. If an old key under that field failed (e.g. an auth error disables it
+// for 7 days), and the user later ROTATES the value in Firebase to a brand new,
+// valid key but keeps the same field name, the new key silently inherited the
+// old key's ban/cooldown from localStorage — so the app kept skipping it and
+// never actually used the freshly-updated key. Folding a short fingerprint of
+// the key's own VALUE into the state id means a rotated key always starts with
+// a clean slate, while the (server-tracked, field-based) usage/quota stats in
+// window.apiKeyStatsCache are intentionally left untouched.
+function getKeyValueFingerprint(value) {
+    try {
+        const v = String(value || '').trim();
+        if (!v) return 'novalue';
+        return v.slice(-10);
+    } catch {
+        return 'novalue';
+    }
+}
+
+function getKeyStateId(keyObj) {
+    const id = (keyObj && keyObj.id) ? String(keyObj.id) : '';
+    const fp = getKeyValueFingerprint(keyObj && keyObj.value);
+    return id ? `${id}::${fp}` : '';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// GOOGLE-DRIVEN QUOTA / RATE-LIMIT HANDLING
+//
+// There used to be a second, app-invented quota system here: a hard-coded
+// "5000 requests / 2M tokens per month" cap (see the old API_QUOTA_LIMITS in
+// index.html) that the app tracked itself and used to permanently gray out
+// a key for the rest of the calendar month. That cap had no relationship to
+// Google's actual per-key limits (which are per-minute / per-day, not
+// monthly, and are usually far more generous than 5000/mo across a shared
+// pool of keys) — it just caused keys to get benched early, shrinking the
+// usable pool and pushing the remaining keys into real 429s faster, which is
+// what produced "ارتباط با هوش مصنوعی برقرار نشد" even though several keys
+// still had plenty of real Google quota left.
+//
+// The app no longer invents its own limits. Every cooldown/disable decision
+// below comes from something Google itself told us in a response:
+//   - A 429's structured error body (google.rpc.RetryInfo.retryDelay and/or
+//     google.rpc.QuotaFailure.violations[].quotaId) tells us exactly how
+//     long to wait, and whether it's a per-minute throttle or a per-day
+//     quota exhaustion.
+//   - A 401/403 with an API_KEY_INVALID-style message tells us the key
+//     itself is bad.
+// See extractGoogleQuotaInfo() and markKeyFailure() below.
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Parse Google's structured 429 error body to find out exactly how long to
+ * wait and what kind of limit was hit, instead of guessing.
+ *
+ * Typical Gemini API 429 body:
+ * {
+ *   "error": {
+ *     "code": 429, "status": "RESOURCE_EXHAUSTED",
+ *     "details": [
+ *       { "@type": ".../google.rpc.QuotaFailure",
+ *         "violations": [{ "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier", ... }] },
+ *       { "@type": ".../google.rpc.RetryInfo", "retryDelay": "31s" }
+ *     ]
+ *   }
+ * }
+ */
+function extractGoogleQuotaInfo(parsedBody) {
+    try {
+        const details = parsedBody?.error?.details;
+        if (!Array.isArray(details)) return null;
+
+        let retryDelaySeconds = null;
+        let isPerDay = false;
+        let isPerMinute = false;
+        let quotaId = null;
+
+        for (const d of details) {
+            const type = String(d?.['@type'] || '');
+            if (type.includes('RetryInfo') && d?.retryDelay) {
+                const m = String(d.retryDelay).match(/([\d.]+)\s*s/i);
+                if (m) retryDelaySeconds = parseFloat(m[1]);
+            }
+            if (type.includes('QuotaFailure') && Array.isArray(d?.violations)) {
+                for (const v of d.violations) {
+                    const id = String(v?.quotaId || v?.quotaMetric || '');
+                    if (id && !quotaId) quotaId = id;
+                    if (/perday/i.test(id)) isPerDay = true;
+                    if (/perminute/i.test(id)) isPerMinute = true;
+                }
+            }
+        }
+
+        if (retryDelaySeconds === null && !isPerDay && !isPerMinute) return null;
+        return { retryDelaySeconds, isPerDay, isPerMinute, quotaId };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Next daily-quota reset boundary Google actually uses for Gemini API
+ * free-tier per-day limits: midnight Pacific Time. Used only as the
+ * cooldown target when Google flags a per-day quota violation but doesn't
+ * hand back an explicit retryDelay for it.
+ */
+function getNextPacificMidnightMs() {
+    try {
+        const now = new Date();
+        const fmt = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/Los_Angeles',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+        });
+        const parts = fmt.formatToParts(now).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+        const secondsIntoDay = ((parseInt(parts.hour, 10) || 0) % 24) * 3600 +
+            (parseInt(parts.minute, 10) || 0) * 60 + (parseInt(parts.second, 10) || 0);
+        const secondsUntilMidnight = (24 * 3600) - secondsIntoDay;
+        return now.getTime() + secondsUntilMidnight * 1000 + 5000; // small buffer past the boundary
+    } catch {
+        // Timezone data unavailable for some reason — 24h is a safe fallback,
+        // not an invented business rule, just a last-resort default.
+        return nowMs() + 24 * 60 * 60 * 1000;
+    }
 }
 
 function getModelState(modelId) {
@@ -239,12 +418,10 @@ function getKeyLastNDaysStats(keyId, days = 3) {
     return { req, ok, err, tok, e429, eAuth, e5xx, eTimeout };
 }
 
-function computeKeyScore(keyId) {
-    if (!keyId) return -Infinity;
+function computeKeyScore(keyObj) {
+    if (!keyObj || !keyObj.id) return -Infinity;
 
-    if (window.isKeyOverQuota?.(keyId)) return -Infinity;
-
-    const state = getKeyState(keyId);
+    const state = getKeyState(getKeyStateId(keyObj));
     const now = nowMs();
 
     if (state.disabledUntil && now < state.disabledUntil) return -Infinity;
@@ -254,7 +431,7 @@ function computeKeyScore(keyId) {
         return -500000 - (state.inFlight * 10000);
     }
 
-    const last = getKeyLastNDaysStats(keyId, 3);
+    const last = getKeyLastNDaysStats(keyObj.id, 3);
     const total = last.req;
     const successRate = total > 0 ? last.ok / total : 1;
 
@@ -267,20 +444,20 @@ function computeKeyScore(keyId) {
     score -= last.eTimeout * 60;
 
     const sinceLastUse = now - (state.lastUsedAt || 0);
-    if (sinceLastUse < 1500) score -= 300;
-    else if (sinceLastUse < 4000) score -= 120;
+    if (sinceLastUse < 800) score -= 200;
+    else if (sinceLastUse < 2000) score -= 80;
 
     return score;
 }
 
 function getOrderedKeys(keys) {
     const scored = keys
-        .map(k => ({ k, score: computeKeyScore(k.id) }))
+        .map(k => ({ k, score: computeKeyScore(k) }))
         .filter(x => Number.isFinite(x.score))
         .sort((a, b) => {
             if (b.score !== a.score) return b.score - a.score;
-            const aLast = getKeyState(a.k.id).lastUsedAt || 0;
-            const bLast = getKeyState(b.k.id).lastUsedAt || 0;
+            const aLast = getKeyState(getKeyStateId(a.k)).lastUsedAt || 0;
+            const bLast = getKeyState(getKeyStateId(b.k)).lastUsedAt || 0;
             return aLast - bLast;
         });
 
@@ -318,7 +495,7 @@ function classifyGeminiError(error) {
     }
 
     if (msg === 'RATE_LIMIT_429' || status === 429 || msg.includes('HTTP_429')) {
-        return { type: 'rate_limit', statusCode: 429 };
+        return { type: 'rate_limit', statusCode: 429, quotaInfo: error?.quotaInfo || null };
     }
     if (msg === 'MODEL_NOT_FOUND' || status === 404) {
         return { type: 'model_not_found', statusCode: 404 };
@@ -345,8 +522,9 @@ function classifyGeminiError(error) {
     return { type: 'unknown' };
 }
 
-function acquireKeyLease(keyId) {
-    const state = getKeyState(keyId);
+function acquireKeyLease(keyObj) {
+    const stateId = getKeyStateId(keyObj);
+    const state = getKeyState(stateId);
     state.lastUsedAt = nowMs();
     state.inFlight = (state.inFlight || 0) + 1;
     persistKeyRuntimeState();
@@ -359,44 +537,73 @@ function acquireKeyLease(keyId) {
         if (released) return;
         released = true;
 
-        const st = getKeyState(keyId);
+        const st = getKeyState(stateId);
         st.inFlight = Math.max(0, (st.inFlight || 0) - 1);
         persistKeyRuntimeState();
     };
 }
 
-function markKeySuccess(keyId) {
-    const state = getKeyState(keyId);
+function markKeySuccess(keyObj) {
+    const state = getKeyState(getKeyStateId(keyObj));
     state.consecutiveFails = 0;
     state.consecutive429 = 0;
     try { delete state.lastError; } catch {}
     state.lastSuccessAt = nowMs();
-    state.cooldownUntil = nowMs() + 900;
+    state.cooldownUntil = nowMs() + 500;
+    delete state.dailyQuotaExceeded;
+
     persistKeyRuntimeState();
 }
 
-function markKeyFailure(keyId, info) {
-    const state = getKeyState(keyId);
+function markKeyFailure(keyObj, info) {
+    const state = getKeyState(getKeyStateId(keyObj));
     state.lastFailureAt = nowMs();
     state.consecutiveFails = (state.consecutiveFails || 0) + 1;
+
+    const isDailyQuota = !!(info?.type === 'rate_limit' && info?.quotaInfo?.isPerDay);
 
     try {
         state.lastError = {
             type: info?.type,
             statusCode: info?.statusCode,
             message: (info?.message || '').toString().slice(0, 300),
-            at: nowMs()
+            at: nowMs(),
+            dailyQuota: isDailyQuota
         };
     } catch {}
 
     if (info?.type === 'rate_limit') {
         state.consecutive429 = (state.consecutive429 || 0) + 1;
-        const base = 30000;
-        const delay = Math.min(10 * 60 * 1000, base * Math.pow(2, Math.max(0, state.consecutive429 - 1)));
-        state.cooldownUntil = nowMs() + delay;
+        const q = info.quotaInfo;
+
+        if (q?.retryDelaySeconds != null && Number.isFinite(q.retryDelaySeconds)) {
+            // Google told us exactly how long to wait (google.rpc.RetryInfo) —
+            // trust that verbatim rather than guessing our own backoff.
+            state.cooldownUntil = nowMs() + Math.ceil(q.retryDelaySeconds * 1000) + 500;
+            state.dailyQuotaExceeded = isDailyQuota;
+        } else if (isDailyQuota) {
+            // Google flagged a per-day quota violation (QuotaFailure with a
+            // "...PerDay..." quotaId) but gave no explicit retryDelay. The
+            // real reset boundary for Gemini API free-tier daily quotas is
+            // midnight Pacific Time, so wait for that instead of a guess.
+            state.cooldownUntil = getNextPacificMidnightMs();
+            state.dailyQuotaExceeded = true;
+        } else {
+            // Bare 429 with no structured details at all — Google gave us
+            // nothing to go on, so fall back to a conservative exponential
+            // backoff purely as a last resort (not a substitute for real info
+            // when it's available).
+            const base = 30000;
+            const delay = Math.min(10 * 60 * 1000, base * Math.pow(2, Math.max(0, state.consecutive429 - 1)));
+            state.cooldownUntil = nowMs() + delay;
+            state.dailyQuotaExceeded = false;
+        }
     } else if (info?.type === 'auth') {
         state.disabledUntil = nowMs() + (7 * 24 * 60 * 60 * 1000);
         state.cooldownUntil = nowMs() + (7 * 24 * 60 * 60 * 1000);
+        // Force re-fetch keys on next call in case the key was rotated in Firebase
+        cachedGeminiKeys = [];
+        cachedGeminiKeysPromise = null;
     } else if (info?.type === 'server') {
         const base = 15000;
         const exp = Math.max(0, (state.consecutiveFails || 1) - 1);
@@ -511,10 +718,19 @@ async function fetchWithRetry(url, options = {}, config = RETRY_CONFIG) {
                 throw err;
             }
             
-            // 429 = Rate limit, throw immediately for key switching
+            // 429 = Rate limit, throw immediately for key switching.
+            // Read the body so we can pull Google's own retryDelay / quota
+            // type (RetryInfo / QuotaFailure) instead of guessing our own
+            // backoff — see extractGoogleQuotaInfo / markKeyFailure.
             if (response.status === 429) {
+                let quotaInfo = null;
+                try {
+                    const bodyText = await response.text();
+                    quotaInfo = extractGoogleQuotaInfo(JSON.parse(bodyText));
+                } catch {}
                 const err = new Error("RATE_LIMIT_429");
                 err.status = 429;
+                err.quotaInfo = quotaInfo;
                 throw err;
             }
 
@@ -581,7 +797,7 @@ async function callGeminiAPIWithRetry(generationConfig, history = [], customRetr
     }
 
     // Load API keys if not cached
-    await ensureGeminiKeysLoaded({ forceRefresh: true });
+    await ensureGeminiKeysLoaded();
     
     if (cachedGeminiKeys.length === 0) {
         throw new Error("کلید API یافت نشد.");
@@ -627,7 +843,7 @@ async function callGeminiAPIWithRetry(generationConfig, history = [], customRetr
     // Determine which models to try
     let modelsToTry;
     
-    if (forcedModel) {
+    if (forcedModel && forcedModel !== 'hybrid') {
         modelsToTry = [forcedModel];
     } else {
         preferredModel = normalizeModelId(preferredModel) || preferredModel;
@@ -639,6 +855,11 @@ async function callGeminiAPIWithRetry(generationConfig, history = [], customRetr
                 try { localStorage.setItem('preferred_model', 'hybrid'); } catch {}
             }
             modelsToTry = preferredModel === 'hybrid' ? [] : [preferredModel];
+            if (preferredModel !== 'hybrid') {
+                const modelOrder = intent === 'quick' ? MODELS_WEAK_TO_STRONG : MODELS_STRONG_TO_WEAK;
+                const otherModels = modelOrder.filter(m => m !== preferredModel && !disabledModels.includes(m));
+                modelsToTry.push(...otherModels);
+            }
         }
 
         if (!modelsToTry || modelsToTry.length === 0) {
@@ -648,7 +869,7 @@ async function callGeminiAPIWithRetry(generationConfig, history = [], customRetr
 
             // Emergency fallback if all disabled
             if (modelsToTry.length === 0) {
-                modelsToTry = ['gemini-2.5-flash'];
+                modelsToTry = ['gemini-3.6-flash'];
             }
         }
     }
@@ -682,7 +903,7 @@ async function callGeminiAPIWithRetry(generationConfig, history = [], customRetr
             const all = cachedGeminiKeys || [];
             let minWait = Infinity;
             for (const k of all) {
-                const st = getKeyState(k.id);
+                const st = getKeyState(getKeyStateId(k));
                 const wait = (st.cooldownUntil || 0) - nowMs();
                 if (wait > 0 && wait < minWait) minWait = wait;
             }
@@ -696,7 +917,7 @@ async function callGeminiAPIWithRetry(generationConfig, history = [], customRetr
             const all = cachedGeminiKeys || [];
             let minWait = Infinity;
             for (const k of all) {
-                const st = getKeyState(k.id);
+                const st = getKeyState(getKeyStateId(k));
                 const wait = (st.cooldownUntil || 0) - nowMs();
                 if (wait > 0 && wait < minWait) minWait = wait;
             }
@@ -708,25 +929,28 @@ async function callGeminiAPIWithRetry(generationConfig, history = [], customRetr
 
         // Try each key for this model
         for (const keyObj of keysToTry) {
-            // Skip over-quota keys
-            if (window.isKeyOverQuota?.(keyObj.id)) {
-                continue;
-            }
-
-            const st = getKeyState(keyObj.id);
+            const st = getKeyState(getKeyStateId(keyObj));
             const nowTry = nowMs();
             if (st.disabledUntil && nowTry < st.disabledUntil) continue;
             if (st.cooldownUntil && nowTry < st.cooldownUntil) continue;
 
-            const releaseLease = acquireKeyLease(keyObj.id);
+            const releaseLease = acquireKeyLease(keyObj);
 
             try {
-                const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${keyObj.value}`;
+                const apiVersion = model.includes('-exp') ? 'v1alpha' : 'v1beta';
+                const endpoint = `https://generativelanguage.googleapis.com/${apiVersion}/models/${model}:generateContent?key=${keyObj.value}`;
                 
+                let finalGenerationConfig = { ...generationConfig };
+                if (model.includes('thinking')) {
+                    delete finalGenerationConfig.response_mime_type;
+                    delete finalGenerationConfig.responseSchema;
+                    delete finalGenerationConfig.systemInstruction;
+                }
+
                 const response = await fetchWithRetry(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ contents: history, generationConfig }),
+                    body: JSON.stringify({ contents: history, generationConfig: finalGenerationConfig }),
                     signal: customRetryConfig?.signal
                 }, RETRY_CONFIG);
                 
@@ -737,7 +961,7 @@ async function callGeminiAPIWithRetry(generationConfig, history = [], customRetr
                     // Log success and token usage
                     const usage = extractTokenUsage(result);
                     window.logApiKeyUsage?.(keyObj.id, true, usage, { statusCode: 200 });
-                    markKeySuccess(keyObj.id);
+                    markKeySuccess(keyObj);
                     try {
                         const ms = getModelState(model);
                         ms.failCount = 0;
@@ -806,7 +1030,7 @@ async function callGeminiAPIWithRetry(generationConfig, history = [], customRetr
                 }
                 if (info.type !== 'model_not_found') {
                     window.logApiKeyUsage?.(keyObj.id, false, { promptTokens: 0, candidatesTokens: 0, totalTokens: 0 }, { errorType: info.type, statusCode: info.statusCode });
-                    markKeyFailure(keyObj.id, { ...info, message: (error?.message || '').toString() });
+                    markKeyFailure(keyObj, { ...info, message: (error?.message || '').toString() });
                 }
                 releaseLease();
                 lastError = error;
@@ -820,6 +1044,14 @@ async function callGeminiAPIWithRetry(generationConfig, history = [], customRetr
                 }
 
                 if (info.type === 'model_not_found') {
+                    console.warn(`🚨 Model ${model} is disabled/not found. Failing this model immediately for this session.`);
+                    modelRuntimeState[model] = modelRuntimeState[model] || {};
+                    modelRuntimeState[model].isFailed = true;
+                    persistModelRuntimeState();
+                    if (localStorage.getItem('preferred_model') === model) {
+                        try { localStorage.setItem('preferred_model', 'hybrid'); } catch {}
+                    }
+                    abortModelEarly = true;
                     break;
                 }
             }
@@ -850,7 +1082,8 @@ async function callGeminiAPIWithRetry(generationConfig, history = [], customRetr
         throw new Error("ظرفیت استفاده تکمیل شده است. لطفاً کمی صبر کنید.");
     }
     
-    throw new Error("ارتباط با هوش مصنوعی برقرار نشد. لطفاً اتصال اینترنت را چک کنید.");
+    // TEMPORARY DEBUG: Throw the exact error message so we can see what Google API is complaining about
+    throw new Error(`خطای API گوگل: ${lastError?.message || 'نامشخص'}`);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -889,7 +1122,8 @@ function displayErrorWithRetry(error, retryCallback, containerElement, dismissCa
 // ═══════════════════════════════════════════════════════════════════
 
 async function callGoogleTranslateAPI(term, targetLang, options = {}) {
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(term)}`;
+    const sourceLang = String(options?.sourceLang || 'auto').trim() || 'auto';
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(sourceLang)}&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(term)}`;
     const response = await fetch(url, { signal: options?.signal });
     
     if (!response.ok) {
@@ -930,8 +1164,13 @@ window.APIUtils = {
 };
 
 try {
-    window.getApiKeyRuntimeState = (keyId) => {
+    window.getApiKeyRuntimeState = (keyId, keyValue) => {
         if (!keyId) return null;
+        if (keyValue) return getKeyState(getKeyStateId({ id: keyId, value: keyValue }));
+        // Fallback (no value provided): try to find the current key by id from
+        // the loaded cache so the fingerprinted state is still used correctly.
+        const found = (cachedGeminiKeys || []).find(k => k && k.id === keyId);
+        if (found) return getKeyState(getKeyStateId(found));
         return getKeyState(keyId);
     };
 } catch {}
