@@ -3767,9 +3767,9 @@
           appId: "1:1031410869099:web:7cf4cbdfeb2c7dfbaa222e"
         };
 
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail, fetchSignInMethodsForEmail } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-        import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, addDoc, query, where, getDocs, getDocsFromCache, getDoc, onSnapshot, doc, updateDoc, deleteDoc, writeBatch, serverTimestamp, orderBy, limit, startAfter, increment, enableIndexedDbPersistence, enableMultiTabIndexedDbPersistence, setDoc, deleteField, getCountFromServer, FieldPath } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+        import { initializeApp } from "./vendor/firebase/firebase-app.js";
+        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail, fetchSignInMethodsForEmail } from "./vendor/firebase/firebase-auth.js";
+        import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, addDoc, query, where, getDocs, getDocsFromCache, getDoc, onSnapshot, doc, updateDoc, deleteDoc, writeBatch, serverTimestamp, orderBy, limit, startAfter, increment, enableIndexedDbPersistence, enableMultiTabIndexedDbPersistence, setDoc, deleteField, getCountFromServer, FieldPath } from "./vendor/firebase/firebase-firestore.js";
 
         const app = initializeApp(firebaseConfig);
         const buildFirestoreQuery = query;
