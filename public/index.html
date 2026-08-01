@@ -21,8 +21,19 @@
     <link rel="stylesheet" href="vendor/fontawesome/css/all.min.css?v=6.5.1">
     <script src="vendor/chartjs/chart.umd.min.js?v=4.4.1"></script>
     <script src="api-utils-v2.js?v=12.8.0"></script>
+    <script src="vendor/firebase-bundle.js"></script>
 
     <style>
+        * {
+            -webkit-tap-highlight-color: transparent;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        input, textarea, [contenteditable="true"] {
+            -webkit-user-select: auto;
+            user-select: auto;
+        }
         /* تنظیم color-scheme برای هماهنگی status bar با تم اپ */
         :root {
             color-scheme: light;
@@ -3767,9 +3778,11 @@
           appId: "1:1031410869099:web:7cf4cbdfeb2c7dfbaa222e"
         };
 
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail, fetchSignInMethodsForEmail } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-        import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, addDoc, query, where, getDocs, getDocsFromCache, getDoc, onSnapshot, doc, updateDoc, deleteDoc, writeBatch, serverTimestamp, orderBy, limit, startAfter, increment, enableIndexedDbPersistence, enableMultiTabIndexedDbPersistence, setDoc, deleteField, getCountFromServer, FieldPath } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+        const {
+            initializeApp,
+            getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail, fetchSignInMethodsForEmail,
+            getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, addDoc, query, where, getDocs, getDocsFromCache, getDoc, onSnapshot, doc, updateDoc, deleteDoc, writeBatch, serverTimestamp, orderBy, limit, startAfter, increment, enableIndexedDbPersistence, enableMultiTabIndexedDbPersistence, setDoc, deleteField, getCountFromServer, FieldPath
+        } = window.FirebaseBundle;
 
         const app = initializeApp(firebaseConfig);
         const buildFirestoreQuery = query;
