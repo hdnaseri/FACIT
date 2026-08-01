@@ -13839,6 +13839,7 @@ Conversation History:
                 mainApp.classList.remove('hidden');
                 try { document.getElementById('bottom-nav')?.classList.remove('hidden'); } catch (e) {}
             } catch (error) {
+                alert("Login/Auth Error: " + (error?.code || error?.message || error));
                 if (__authMode === 'register') {
                     const code = String(error?.code || '');
                     if (code.includes('auth/email-already-in-use')) { showAuthError('این ایمیل قبلاً ثبت‌نام شده است.'); }
@@ -13848,7 +13849,7 @@ Conversation History:
                     else if (code.includes('auth/network-request-failed')) { showAuthError('مشکل شبکه. اینترنت را بررسی کنید و دوباره تلاش کنید.'); }
                     else { showAuthError('خطا در ثبت‌نام. لطفاً دوباره تلاش کنید.'); }
                 } else {
-                    showAuthError(String(error?.code || '').includes('auth/invalid-credential') ? "ایمیل یا رمز عبور اشتباه است." : "خطای ناشناخته.");
+                    showAuthError(String(error?.code || '').includes('auth/invalid-credential') ? "ایمیل یا رمز عبور اشتباه است." : ("خطای ناشناخته: " + (error?.code || error?.message || "")));
                 }
             }
         });
