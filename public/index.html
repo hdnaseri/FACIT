@@ -3793,7 +3793,7 @@
         const {
             initializeApp,
             getAuth, initializeAuth, browserLocalPersistence, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail, fetchSignInMethodsForEmail,
-            getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, addDoc, query, where, getDocs, getDocsFromCache, getDoc, onSnapshot, doc, updateDoc, deleteDoc, writeBatch, serverTimestamp, orderBy, limit, startAfter, increment, enableIndexedDbPersistence, enableMultiTabIndexedDbPersistence, setDoc, deleteField, getCountFromServer, FieldPath
+            getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, persistentSingleTabManager, collection, addDoc, query, where, getDocs, getDocsFromCache, getDoc, onSnapshot, doc, updateDoc, deleteDoc, writeBatch, serverTimestamp, orderBy, limit, startAfter, increment, enableIndexedDbPersistence, enableMultiTabIndexedDbPersistence, setDoc, deleteField, getCountFromServer, FieldPath
         } = window.FirebaseBundle;
 
         const app = initializeApp(firebaseConfig);
@@ -3804,11 +3804,18 @@
                 persistence: browserLocalPersistence
             });
         } catch (e) {
-            window.__authFailReason = e.message || String(e);
             auth = getAuth(app);
         }
-        let db = getFirestore(app);
-        let __firestoreCacheConfigured = true;
+        let db;
+        let __firestoreCacheConfigured = false;
+        try {
+            // Using single tab manager is much safer for WKWebView and restores offline performance
+            db = initializeFirestore(app, { localCache: persistentLocalCache({ tabManager: persistentSingleTabManager() }) });
+            __firestoreCacheConfigured = true;
+        } catch (e) {
+            console.warn("Could not enable Firestore persistence", e);
+            db = getFirestore(app);
+        }
 
         // Make auth and fetchApiKey available globally for api-utils.js
         window.auth = auth;
@@ -13847,43 +13854,12 @@ Conversation History:
                     await createUserWithEmailAndPassword(auth, email, password);
                     querySnapshot.forEach(async (doc) => await deleteDoc(doc.ref));
                 } else {
-                    showAuthError('در حال ارتباط با سرور...');
-                    
-                    // Race the login against a 10 second timeout to detect hanging
-                    const timeoutPromise = new Promise((_, reject) => 
-                        setTimeout(() => reject(new Error('TIMEOUT_HANG')), 10000)
-                    );
-                    
-                    try {
-                        await Promise.race([
-                            signInWithEmailAndPassword(auth, email, password),
-                            timeoutPromise
-                        ]);
-                    } catch (signInErr) {
-                        if (signInErr.message === 'TIMEOUT_HANG') {
-                            showAuthError('ورود هنگ کرد (مشکل ذخیره‌سازی). در حال تلاش با روش جایگزین...');
-                            // Try one last time with no persistence fallback if we can't change it now
-                            // But usually if it hangs, the browser worker is stuck. 
-                            throw new Error('سیستم ورود روی این دستگاه هنگ می‌کند.');
-                        }
-                        throw signInErr; // Re-throw normal auth errors
-                    }
+                    await signInWithEmailAndPassword(auth, email, password);
                 }
-                
-                showAuthError('در حال آماده‌سازی محیط برنامه...');
                 hasInitialDisplayRendered = true;
-                try {
-                    toggleRootAppScreens(auth.currentUser || currentUser);
-                } catch (toggleErr) {
-                    showAuthError('خطا در رندر برنامه: ' + toggleErr.message);
-                }
+                toggleRootAppScreens(auth.currentUser || currentUser);
             } catch (error) {
-                // If it's our custom hang error, keep it on screen
-                if (error.message && error.message.includes('هنگ')) {
-                    showAuthError(error.message + (window.__authFailReason ? " (" + window.__authFailReason + ")" : ""));
-                    return;
-                }
-                // Otherwise process normal Firebase error
+                alert("Login/Auth Error: " + (error?.code || error?.message || error));
                 if (__authMode === 'register') {
                     const code = String(error?.code || '');
                     if (code.includes('auth/email-already-in-use')) { showAuthError('این ایمیل قبلاً ثبت‌نام شده است.'); }
