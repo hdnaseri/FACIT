@@ -3806,14 +3806,8 @@
         } catch (e) {
             auth = getAuth(app);
         }
-        let db;
-        let __firestoreCacheConfigured = false;
-        try {
-            db = initializeFirestore(app, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
-            __firestoreCacheConfigured = true;
-        } catch (e) {
-            db = getFirestore(app);
-        }
+        let db = getFirestore(app);
+        let __firestoreCacheConfigured = true;
 
         // Make auth and fetchApiKey available globally for api-utils.js
         window.auth = auth;
@@ -13790,7 +13784,7 @@ Conversation History:
                 } finally {
                     if (isInitialAuthCheck) {
                         resolveInitialAuth(nextUser);
-                    } else if (hasInitialDisplayRendered) {
+                    } else {
                         toggleRootAppScreens(nextUser);
                     }
                 }
@@ -13854,9 +13848,8 @@ Conversation History:
                 } else {
                     await signInWithEmailAndPassword(auth, email, password);
                 }
-                authScreen.classList.add('hidden');
-                mainApp.classList.remove('hidden');
-                try { document.getElementById('bottom-nav')?.classList.remove('hidden'); } catch (e) {}
+                hasInitialDisplayRendered = true;
+                toggleRootAppScreens(auth.currentUser || currentUser);
             } catch (error) {
                 alert("Login/Auth Error: " + (error?.code || error?.message || error));
                 if (__authMode === 'register') {
