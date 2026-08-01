@@ -1206,6 +1206,73 @@
             border-color: transparent;
         }
 
+        /* ===== Edit Modal: مشتقات و حروف اضافه — شمارنده‌ی کوچک کنار عنوان ===== */
+        .edit-section-count {
+            font-size: 0.75rem;
+            font-weight: normal;
+            color: #9ca3af;
+        }
+        .dark .edit-section-count {
+            color: #6b7280;
+        }
+
+        /* ===== Edit Modal: chip editors (مشتقات / حروف اضافه) — همان ظاهر chip های صفحه‌ی نمایش کلمه ===== */
+        .chip-editor-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.3rem 0.6rem;
+            border-radius: 0.375rem;
+            font-size: 0.8125rem;
+        }
+        .chip-editor-item.chip-word-family {
+            background-color: #f3e8ff;
+            color: #6b21a8;
+        }
+        .dark .chip-editor-item.chip-word-family {
+            background-color: rgba(107,33,168,0.35);
+            color: #e9d5ff;
+        }
+        .chip-editor-item.chip-preposition {
+            background-color: #dbeafe;
+            color: #1e40af;
+        }
+        .dark .chip-editor-item.chip-preposition {
+            background-color: rgba(30,64,175,0.35);
+            color: #bfdbfe;
+        }
+        .chip-editor-item.chip-related {
+            background-color: #d1fae5;
+            color: #065f46;
+        }
+        .dark .chip-editor-item.chip-related {
+            background-color: rgba(6,95,70,0.35);
+            color: #a7f3d0;
+        }
+        .chip-editor-item.chip-hidden {
+            background-color: #f3f4f6;
+            color: #9ca3af;
+            text-decoration: line-through;
+        }
+        .dark .chip-editor-item.chip-hidden {
+            background-color: #374151;
+            color: #6b7280;
+        }
+        .chip-toggle-btn, .chip-delete-btn {
+            opacity: 0.6;
+            transition: opacity 0.15s ease;
+        }
+        .chip-toggle-btn:hover, .chip-delete-btn:hover {
+            opacity: 1;
+        }
+        .chip-empty-hint {
+            border: 1px dashed #d1d5db;
+            border-radius: 0.375rem;
+            padding: 0.5rem 0.75rem;
+        }
+        .dark .chip-empty-hint {
+            border-color: #4b5563;
+        }
 
     </style>
      <script>
@@ -31676,15 +31743,42 @@ Example:
             }
         }
 
-        // --- Edit-modal chip editors for "خانواده واژه" (مشتقات) و "حروف اضافه" ---
-        // هر مورد به صورت یک chip قابل مخفی‌سازی (toggle، برگشت‌پذیر تا لحظه ذخیره)
-        // یا حذف کامل (بلافاصله از لیست خارج می‌شود) نمایش داده می‌شود.
+        // --- Edit-modal chip editors ---
+        // «اسم‌های مشتق» و «صفت‌های مشتق» (nounForms/adjectiveForms) همون آبجکت‌های کامل صرفی‌ای
+        // هستن که جدول واقعی صرف رو در صفحه‌ی نمایش کلمه می‌سازن؛ فقط می‌شه مخفی/حذف‌شون کرد
+        // (نه دستی اضافه کرد، چون هر مورد باید ۴ فرم دستوری درست داشته باشه).
+        // «کلمات هم‌خانواده» (wordFamily) و «حروف اضافه» یک لیست ساده‌ی متنی هستن: مخفی/حذف/افزودن.
+        // مخفی‌کردن برگشت‌پذیره (حتی بعد از ذخیره) چون آیتم به‌جای پاک‌شدن، به فیلد hiddenXxx
+        // متناظرش منتقل می‌شه؛ حذف همیشگیه.
+        let editNounFormsState = [];
+        let editAdjectiveFormsState = [];
         let editWordFamilyState = [];
         let editPrepositionState = [];
         let editGrammarNotesRestText = '';
 
+        // نگاشت نام گروه به آرایه‌ی state متناظر (برای جلوگیری از تکرار شرط‌های چندگانه)
+        function getChipGroupState(group) {
+            if (group === 'nounForms') return editNounFormsState;
+            if (group === 'adjectiveForms') return editAdjectiveFormsState;
+            if (group === 'wordFamily') return editWordFamilyState;
+            return editPrepositionState;
+        }
+
         function makeChipState(lines) {
             return (Array.isArray(lines) ? lines : []).map(text => ({ text: String(text || '').trim(), hidden: false })).filter(it => it.text);
+        }
+
+        // برای nounForms/adjectiveForms — که آبجکت کامل صرفی‌اند نه رشته ساده — علاوه بر برچسب
+        // نمایشی، خودِ آبجکت اصلی را هم در raw نگه می‌داریم تا موقع ذخیره چیزی از دست نره.
+        function makeFormObjectChipState(items, kind) {
+            return (Array.isArray(items) ? items : [])
+                .filter(entry => entry && typeof entry === 'object')
+                .map(entry => {
+                    const meaning = String(entry.meaning || '').trim();
+                    const word = getDerivedEntryWord(entry, kind);
+                    const text = meaning ? `${meaning}: ${word}` : (word || '—');
+                    return { text, hidden: false, raw: entry };
+                });
         }
 
         // خط "حرف اضافه: X" یا "حرف اضافه: X و Y" یا "حرف اضافه: A، B و C" را از متن
@@ -31714,30 +31808,38 @@ Example:
         }
 
         function chipEditorItemHtml(group, idx, item) {
-            const hiddenCls = item.hidden
-                ? 'opacity-40 line-through bg-gray-100 dark:bg-gray-800 border-gray-300 dark:border-gray-600'
-                : 'bg-white dark:bg-gray-700 border-blue-300 dark:border-blue-600';
-            return `<span class="chip-editor-item inline-flex items-center gap-1 px-2 py-1 my-1 rounded-full border text-xs ${hiddenCls}">
+            const typeClsMap = { nounForms: 'chip-word-family', adjectiveForms: 'chip-word-family', wordFamily: 'chip-related', prepositions: 'chip-preposition' };
+            const cls = item.hidden ? 'chip-hidden' : typeClsMap[group];
+            return `<span class="chip-editor-item ${cls}">
                 <span class="text-content-ltr">${escapeHtml(item.text)}</span>
-                <button type="button" class="chip-toggle-btn text-gray-400 hover:text-yellow-500 px-0.5" data-group="${group}" data-idx="${idx}" title="${item.hidden ? 'نمایش دوباره' : 'مخفی کردن'}"><i class="fa ${item.hidden ? 'fa-eye' : 'fa-eye-slash'}"></i></button>
-                <button type="button" class="chip-delete-btn text-gray-400 hover:text-red-500 px-0.5" data-group="${group}" data-idx="${idx}" title="حذف کامل"><i class="fa fa-times"></i></button>
+                <button type="button" class="chip-toggle-btn" style="color:inherit" data-group="${group}" data-idx="${idx}" title="${item.hidden ? 'نمایش دوباره' : 'مخفی کردن'}"><i class="fa ${item.hidden ? 'fa-eye' : 'fa-eye-slash'}"></i></button>
+                <button type="button" class="chip-delete-btn" style="color:inherit" data-group="${group}" data-idx="${idx}" title="حذف کامل"><i class="fa fa-times"></i></button>
             </span>`;
         }
 
         function renderChipGroupUI(group) {
-            const state = group === 'wordFamily' ? editWordFamilyState : editPrepositionState;
+            const state = getChipGroupState(group);
             const container = modalContent.querySelector(`#edit-${group}-chips`);
             if (!container) return;
+            const hiddenCount = state.filter(it => it.hidden).length;
+            const emptyLabelMap = {
+                nounForms: 'هیچ اسم مشتقی با جدول صرف ثبت نشده',
+                adjectiveForms: 'هیچ صفت مشتقی با جدول صرف ثبت نشده',
+                wordFamily: 'هیچ کلمه هم‌خانواده‌ای ثبت نشده',
+                prepositions: 'هیچ حرف اضافه‌ای ثبت نشده'
+            };
             container.innerHTML = state.length
                 ? state.map((item, idx) => chipEditorItemHtml(group, idx, item)).join('')
-                : `<p class="text-xs text-gray-400 dark:text-gray-500">موردی ثبت نشده</p>`;
+                : `<p class="chip-empty-hint text-xs text-gray-400 dark:text-gray-500 w-full text-center">${emptyLabelMap[group]}</p>`;
+            const counterEl = modalContent.querySelector(`#edit-${group}-counter`);
+            if (counterEl) counterEl.textContent = hiddenCount > 0 ? `${state.length} مورد، ${hiddenCount} مخفی` : (state.length ? `${state.length} مورد` : '');
         }
 
         function bindChipEditorEvents() {
             modalContent.querySelectorAll('.chip-toggle-btn').forEach(btn => {
                 btn.onclick = () => {
                     const group = btn.dataset.group, idx = Number(btn.dataset.idx);
-                    const state = group === 'wordFamily' ? editWordFamilyState : editPrepositionState;
+                    const state = getChipGroupState(group);
                     if (state[idx]) state[idx].hidden = !state[idx].hidden;
                     renderChipGroupUI(group);
                     bindChipEditorEvents();
@@ -31746,12 +31848,14 @@ Example:
             modalContent.querySelectorAll('.chip-delete-btn').forEach(btn => {
                 btn.onclick = () => {
                     const group = btn.dataset.group, idx = Number(btn.dataset.idx);
-                    const state = group === 'wordFamily' ? editWordFamilyState : editPrepositionState;
+                    const state = getChipGroupState(group);
                     state.splice(idx, 1);
                     renderChipGroupUI(group);
                     bindChipEditorEvents();
                 };
             });
+            // فقط «کلمات هم‌خانواده» و «حروف اضافه» قابل افزودن دستی‌اند (رشته‌ی ساده‌اند)؛
+            // اسم/صفت مشتق چون آبجکت کامل صرفی لازم دارن، از این‌جا اضافه نمی‌شن.
             ['wordFamily', 'prepositions'].forEach(group => {
                 const addBtn = modalContent.querySelector(`#edit-${group}-add-btn`);
                 const addInput = modalContent.querySelector(`#edit-${group}-add-input`);
@@ -31759,7 +31863,7 @@ Example:
                 const doAdd = () => {
                     const val = addInput.value.trim();
                     if (!val) return;
-                    const state = group === 'wordFamily' ? editWordFamilyState : editPrepositionState;
+                    const state = getChipGroupState(group);
                     state.push({ text: val, hidden: false });
                     addInput.value = '';
                     renderChipGroupUI(group);
@@ -31810,11 +31914,33 @@ Example:
             const editCommonMistakes = Array.isArray(data.commonMistakes) ? data.commonMistakes.filter(Boolean).join('\n') : String(data.commonMistakes || '').trim();
             const editCulturalContext = Array.isArray(data.culturalContext) ? data.culturalContext.filter(Boolean).join('\n') : String(data.culturalContext || '').trim();
 
-            // مقداردهی اولیه ویرایشگرهای chip برای "خانواده واژه" (مشتقات) و "حروف اضافه"
+            // مقداردهی اولیه ویرایشگرهای chip.
+            // «اسم‌های مشتق» و «صفت‌های مشتق» از nounForms/adjectiveForms خوانده می‌شوند —
+            // همون آبجکت‌های کامل صرفی‌ای که جدول واقعی رو در صفحه‌ی نمایش کلمه می‌سازن.
+            // «کلمات هم‌خانواده» از wordFamily (لیست ساده‌ی متنی) خونده می‌شه.
+            // موارد مخفی‌شده قبلی از aiData.hiddenNounForms / hiddenAdjectiveForms /
+            // hiddenWordFamily / hiddenPrepositions دوباره خوانده می‌شوند تا حتی بعد از
+            // ذخیره هم بشود آن‌ها را دوباره نمایان کرد.
+            editNounFormsState = [
+                ...makeFormObjectChipState(data.nounForms, 'noun'),
+                ...makeFormObjectChipState(data.hiddenNounForms, 'noun').map(it => ({ ...it, hidden: true }))
+            ];
+            editAdjectiveFormsState = [
+                ...makeFormObjectChipState(data.adjectiveForms, 'adjective'),
+                ...makeFormObjectChipState(data.hiddenAdjectiveForms, 'adjective').map(it => ({ ...it, hidden: true }))
+            ];
             const wordFamilyLines = listToString(data.wordFamily).split('\n').map(s => s.trim()).filter(Boolean);
-            editWordFamilyState = makeChipState(wordFamilyLines);
+            const hiddenWordFamilyLines = listToString(data.hiddenWordFamily).split('\n').map(s => s.trim()).filter(Boolean);
+            editWordFamilyState = [
+                ...makeChipState(wordFamilyLines),
+                ...makeChipState(hiddenWordFamilyLines).map(it => ({ ...it, hidden: true }))
+            ];
             const grammarNotesParsed = parsePrepositionsFromGrammarNotes(editGrammarNotes);
-            editPrepositionState = makeChipState(grammarNotesParsed.items);
+            const hiddenPrepositionLines = listToString(data.hiddenPrepositions).split('\n').map(s => s.trim()).filter(Boolean);
+            editPrepositionState = [
+                ...makeChipState(grammarNotesParsed.items),
+                ...makeChipState(hiddenPrepositionLines).map(it => ({ ...it, hidden: true }))
+            ];
             editGrammarNotesRestText = grammarNotesParsed.rest;
 
             // DIAGNOSTIC PANEL: shows exactly why this word is (or isn't) flagged as
@@ -31851,13 +31977,16 @@ Example:
                 diagnosticsHtml = `<div class="bg-red-50 dark:bg-red-900/20 p-4 rounded-xl border border-red-200 dark:border-red-800 text-xs text-right">خطا در محاسبه تشخیص نقص: ${String(e?.message || e)}</div>`;
             }
 
+            const sectionHeader = (title) => `<h3 class="font-bold mb-3 text-blue-600 dark:text-blue-400 border-b border-gray-200 dark:border-gray-600 pb-2 text-right">${title}</h3>`;
+
             modalContent.innerHTML = `
                 <div class="space-y-6 text-sm">
                     ${diagnosticsHtml}
+
                     <!-- Basic Info -->
                     <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-xl border border-gray-200 dark:border-gray-600">
-                        <h3 class="font-bold mb-3 text-blue-600 dark:text-blue-400 border-b border-gray-200 dark:border-gray-600 pb-2 text-right">اطلاعات پایه</h3>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        ${sectionHeader('اطلاعات پایه')}
+                        <div class="grid grid-cols-1 gap-4">
                             <div><label class="block font-bold mb-1 text-xs text-right">کلمه اصلی</label><input id="edit-originalTerm" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 text-content-ltr focus:ring-2 focus:ring-blue-500" value="${word.originalTerm || ''}"></div>
                             <div><label class="block font-bold mb-1 text-xs text-right">نوع کلمه</label><input id="edit-partOfSpeech" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 text-content-rtl focus:ring-2 focus:ring-blue-500" value="${data.partOfSpeech || ''}"></div>
                             <div><label class="block font-bold mb-1 text-xs text-right">تلفظ (IPA)</label><input id="edit-ipa" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 text-content-ltr focus:ring-2 focus:ring-blue-500" value="${editIpa}"></div>
@@ -31869,7 +31998,7 @@ Example:
 
                     <!-- Explanations -->
                     <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-xl border border-gray-200 dark:border-gray-600">
-                        <h3 class="font-bold mb-3 text-blue-600 dark:text-blue-400 border-b border-gray-200 dark:border-gray-600 pb-2 text-right">توضیحات و نکات</h3>
+                        ${sectionHeader('توضیحات و نکات')}
                         <div class="space-y-3">
                             <div><label class="block font-bold mb-1 text-xs text-right">توضیحات</label><textarea id="edit-explanation" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 h-20 text-content-rtl focus:ring-2 focus:ring-blue-500">${editExplanation}</textarea></div>
                             <div><label class="block font-bold mb-1 text-xs text-right">نکات گرامری (غیر از حروف اضافه)</label><textarea id="edit-grammarNotes" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 h-20 text-content-rtl focus:ring-2 focus:ring-blue-500">${editGrammarNotesRestText}</textarea></div>
@@ -31878,34 +32007,47 @@ Example:
                         </div>
                     </div>
 
-                    <!-- Derived words + Prepositions (hide/delete chip editors) -->
+                    <!-- Derived forms with full paradigm tables (nounForms / adjectiveForms) -->
                     <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-xl border border-gray-200 dark:border-gray-600">
-                        <h3 class="font-bold mb-3 text-blue-600 dark:text-blue-400 border-b border-gray-200 dark:border-gray-600 pb-2 text-right">
-                            <i class="fa fa-sitemap ml-1"></i> مشتقات و حروف اضافه
-                        </h3>
-                        <p class="text-xs text-gray-500 dark:text-gray-400 mb-3 text-right">روی <i class="fa fa-eye-slash"></i> بزنید تا موقتاً مخفی شود (تا قبل از ذخیره قابل بازگشت است)، یا روی <i class="fa fa-times"></i> بزنید تا کاملاً حذف شود.</p>
+                        ${sectionHeader('مشتقات دارای جدول صرف')}
+                        <p class="text-xs text-gray-500 dark:text-gray-400 mb-3 text-right leading-5">این‌ها همون اسم/صفت‌های مشتقی هستن که جدول کامل صرف‌شون در صفحه‌ی نمایش کلمه دیده می‌شه. روی <i class="fa fa-eye-slash"></i> بزنید تا موقتاً مخفی شود (بعداً هم قابل بازگشت است)، یا روی <i class="fa fa-times"></i> بزنید تا کاملاً حذف شود. چون هر مورد یک جدول کامل صرفی داره، از اینجا نمی‌شه مورد جدید دستی اضافه کرد.</p>
                         <div class="mb-4">
-                            <label class="block font-bold mb-1 text-xs text-right">خانواده واژه (مشتقات)</label>
-                            <div id="edit-wordFamily-chips" class="flex flex-wrap gap-1 justify-end p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 min-h-[2.5rem]"></div>
-                            <div class="flex gap-2 mt-2">
-                                <button type="button" id="edit-wordFamily-add-btn" class="bg-blue-500 text-white px-3 rounded-lg text-xs font-bold hover:bg-blue-600">افزودن</button>
-                                <input type="text" id="edit-wordFamily-add-input" placeholder="مثلاً: اسم مشتق: en udpegning" class="flex-1 p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 text-content-ltr text-xs focus:ring-2 focus:ring-blue-500">
+                            <label class="flex items-center justify-between mb-1 text-xs text-right"><span>اسم‌های مشتق</span><span id="edit-nounForms-counter" class="edit-section-count"></span></label>
+                            <div id="edit-nounForms-chips" class="flex flex-wrap gap-1.5 justify-end p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 min-h-[2.25rem]"></div>
+                        </div>
+                        <div>
+                            <label class="flex items-center justify-between mb-1 text-xs text-right"><span>صفت‌های مشتق</span><span id="edit-adjectiveForms-counter" class="edit-section-count"></span></label>
+                            <div id="edit-adjectiveForms-chips" class="flex flex-wrap gap-1.5 justify-end p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 min-h-[2.25rem]"></div>
+                        </div>
+                    </div>
+
+                    <!-- Word family + Prepositions (simple text list, hide/delete/add) -->
+                    <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-xl border border-gray-200 dark:border-gray-600">
+                        ${sectionHeader('کلمات هم‌خانواده و حروف اضافه')}
+                        <p class="text-xs text-gray-500 dark:text-gray-400 mb-3 text-right leading-5">روی <i class="fa fa-eye-slash"></i> بزنید تا موقتاً مخفی شود (بعداً هم قابل بازگشت است)، یا روی <i class="fa fa-times"></i> بزنید تا کاملاً حذف شود.</p>
+                        <div class="mb-4">
+                            <label class="flex items-center justify-between mb-1 text-xs text-right"><span>کلمات هم‌خانواده</span><span id="edit-wordFamily-counter" class="edit-section-count"></span></label>
+                            <div id="edit-wordFamily-chips" class="flex flex-wrap gap-1.5 justify-end p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 min-h-[2.25rem]"></div>
+                            <div class="chip-add-row flex gap-2 mt-2">
+                                <input type="text" id="edit-wordFamily-add-input" placeholder="مثلاً: تابعیت: statsborgerskab" class="flex-1 p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 text-content-ltr text-xs focus:ring-2 focus:ring-blue-500">
+                                <button type="button" id="edit-wordFamily-add-btn" class="bg-blue-500 text-white w-9 rounded-lg text-sm font-bold hover:bg-blue-600 flex items-center justify-center" title="افزودن"><i class="fa fa-plus"></i></button>
                             </div>
                         </div>
                         <div>
-                            <label class="block font-bold mb-1 text-xs text-right">حروف اضافه</label>
-                            <div id="edit-prepositions-chips" class="flex flex-wrap gap-1 justify-end p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 min-h-[2.5rem]"></div>
-                            <div class="flex gap-2 mt-2">
-                                <button type="button" id="edit-prepositions-add-btn" class="bg-blue-500 text-white px-3 rounded-lg text-xs font-bold hover:bg-blue-600">افزودن</button>
+                            <label class="flex items-center justify-between mb-1 text-xs text-right"><span>حروف اضافه</span><span id="edit-prepositions-counter" class="edit-section-count"></span></label>
+                            <div id="edit-prepositions-chips" class="flex flex-wrap gap-1.5 justify-end p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 min-h-[2.25rem]"></div>
+                            <div class="chip-add-row flex gap-2 mt-2">
                                 <input type="text" id="edit-prepositions-add-input" placeholder="مثلاً: på" class="flex-1 p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 text-content-ltr text-xs focus:ring-2 focus:ring-blue-500">
+                                <button type="button" id="edit-prepositions-add-btn" class="bg-blue-500 text-white w-9 rounded-lg text-sm font-bold hover:bg-blue-600 flex items-center justify-center" title="افزودن"><i class="fa fa-plus"></i></button>
                             </div>
                         </div>
                     </div>
 
+
                     <!-- Lists -->
                     <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-xl border border-gray-200 dark:border-gray-600">
-                        <h3 class="font-bold mb-3 text-blue-600 dark:text-blue-400 border-b border-gray-200 dark:border-gray-600 pb-2 text-right">روابط واژگانی دیگر (هر مورد در یک خط)</h3>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        ${sectionHeader('روابط واژگانی دیگر (هر مورد در یک خط)')}
+                        <div class="grid grid-cols-1 gap-4">
                             <div><label class="block font-bold mb-1 text-xs text-right">هم‌آیندها (Collocations)</label><textarea id="edit-collocations" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 h-24 text-content-ltr focus:ring-2 focus:ring-blue-500" placeholder="phrase (translation)">${listToString(data.collocations)}</textarea></div>
                             <div><label class="block font-bold mb-1 text-xs text-right">مترادف‌ها</label><textarea id="edit-synonyms" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 h-24 text-content-ltr focus:ring-2 focus:ring-blue-500" placeholder="meaning: word">${listToString(data.synonyms)}</textarea></div>
                             <div><label class="block font-bold mb-1 text-xs text-right">متضادها</label><textarea id="edit-antonyms" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 h-24 text-content-ltr focus:ring-2 focus:ring-blue-500" placeholder="meaning: word">${listToString(data.antonyms)}</textarea></div>
@@ -31916,17 +32058,19 @@ Example:
 
                     <!-- Examples -->
                     <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-xl border border-gray-200 dark:border-gray-600">
-                        <h3 class="font-bold mb-3 text-blue-600 dark:text-blue-400 border-b border-gray-200 dark:border-gray-600 pb-2 text-right">مثال‌ها (فرمت: جمله | ترجمه)</h3>
+                        ${sectionHeader('مثال‌ها (فرمت: جمله | ترجمه)')}
                         <textarea id="edit-examples" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 h-32 text-content-ltr focus:ring-2 focus:ring-blue-500" placeholder="Original Sentence | Persian Translation">${examplesToString(data.examples)}</textarea>
                     </div>
 
                     <!-- Categories -->
                     <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-xl border border-gray-200 dark:border-gray-600">
-                        <h3 class="font-bold mb-2 text-content-rtl text-blue-600 dark:text-blue-400 border-b border-gray-200 dark:border-gray-600 pb-2">دسته‌بندی‌ها</h3>
+                        ${sectionHeader('دسته‌بندی‌ها')}
                         <div id="edit-category-checkboxes" class="flex flex-wrap gap-2 justify-end"></div>
                     </div>
                 </div>
             `;
+            renderChipGroupUI('nounForms');
+            renderChipGroupUI('adjectiveForms');
             renderChipGroupUI('wordFamily');
             renderChipGroupUI('prepositions');
             bindChipEditorEvents();
@@ -31979,8 +32123,16 @@ Example:
 
             // موارد مخفی‌شده (hidden) در ویرایشگر chip از نتیجه ذخیره‌سازی کنار گذاشته می‌شوند —
             // درست مثل موارد حذف‌شده، با این تفاوت که تا لحظه ذخیره قابل بازگشت بودند.
+            // برای nounForms/adjectiveForms از item.raw استفاده می‌کنیم تا آبجکت کامل صرفی
+            // (نه فقط برچسب نمایشی‌اش) دقیقاً دست‌نخورده ذخیره/بازیابی بشه.
+            const finalNounForms = editNounFormsState.filter(it => !it.hidden).map(it => it.raw);
+            const finalHiddenNounForms = editNounFormsState.filter(it => it.hidden).map(it => it.raw);
+            const finalAdjectiveForms = editAdjectiveFormsState.filter(it => !it.hidden).map(it => it.raw);
+            const finalHiddenAdjectiveForms = editAdjectiveFormsState.filter(it => it.hidden).map(it => it.raw);
             const finalWordFamily = editWordFamilyState.filter(it => !it.hidden).map(it => it.text);
+            const finalHiddenWordFamily = editWordFamilyState.filter(it => it.hidden).map(it => it.text);
             const finalPrepositionLine = formatPrepositionLine(editPrepositionState.filter(it => !it.hidden).map(it => it.text));
+            const finalHiddenPrepositions = editPrepositionState.filter(it => it.hidden).map(it => it.text);
             const finalGrammarNotes = [document.getElementById('edit-grammarNotes').value.trim(), finalPrepositionLine].filter(Boolean).join('\n');
 
             const updatedData = {
@@ -32009,7 +32161,13 @@ Example:
                     commonMistakes: document.getElementById('edit-commonMistakes').value,
                     culturalContext: document.getElementById('edit-culturalContext').value,
                     collocations: stringToList(document.getElementById('edit-collocations').value),
+                    nounForms: finalNounForms,
+                    hiddenNounForms: finalHiddenNounForms,
+                    adjectiveForms: finalAdjectiveForms,
+                    hiddenAdjectiveForms: finalHiddenAdjectiveForms,
                     wordFamily: finalWordFamily,
+                    hiddenWordFamily: finalHiddenWordFamily,
+                    hiddenPrepositions: finalHiddenPrepositions,
                     synonyms: stringToList(document.getElementById('edit-synonyms').value),
                     antonyms: stringToList(document.getElementById('edit-antonyms').value),
                     relatedWords: stringToList(document.getElementById('edit-relatedWords').value),
