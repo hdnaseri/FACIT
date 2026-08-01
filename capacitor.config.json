@@ -1,5 +1,10 @@
 {
   "appId": "com.facit.app",
   "appName": "FACIT",
-  "webDir": "public"
+  "webDir": "public",
+  "server": {
+    "iosScheme": "https",
+    "androidScheme": "https",
+    "cleartext": true
+  }
 }
