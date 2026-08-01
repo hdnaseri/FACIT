@@ -3792,13 +3792,20 @@
 
         const {
             initializeApp,
-            getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail, fetchSignInMethodsForEmail,
+            getAuth, initializeAuth, browserLocalPersistence, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail, fetchSignInMethodsForEmail,
             getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, addDoc, query, where, getDocs, getDocsFromCache, getDoc, onSnapshot, doc, updateDoc, deleteDoc, writeBatch, serverTimestamp, orderBy, limit, startAfter, increment, enableIndexedDbPersistence, enableMultiTabIndexedDbPersistence, setDoc, deleteField, getCountFromServer, FieldPath
         } = window.FirebaseBundle;
 
         const app = initializeApp(firebaseConfig);
         const buildFirestoreQuery = query;
-        const auth = getAuth(app);
+        let auth;
+        try {
+            auth = initializeAuth(app, {
+                persistence: browserLocalPersistence
+            });
+        } catch (e) {
+            auth = getAuth(app);
+        }
         let db;
         let __firestoreCacheConfigured = false;
         try {
