@@ -4921,32 +4921,35 @@
             } catch (e) {}
         }
 
+        let __lastCacheLoadDebugReason = 'not-run';
         async function loadLocalWordsCache() {
-            if (!currentUser) return false;
+            if (!currentUser) { __lastCacheLoadDebugReason = 'no-currentUser'; return false; }
             try {
                 const scope = getLocalCacheKey(LOCAL_WORDS_CACHE_KEY);
                 const cacheData = await idbGetMeta(scope + '_meta');
 
-                if (!cacheData) return false;
+                if (!cacheData) { __lastCacheLoadDebugReason = 'no-meta-found (scope=' + scope + ')'; return false; }
 
                 // Validate cache
                 if (cacheData.version !== LOCAL_CACHE_VERSION) {
                     try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Cache] Version mismatch, clearing old cache'); } catch (e) {}
                     try { await idbClearScope(scope); } catch (e) {}
+                    __lastCacheLoadDebugReason = 'version-mismatch (stored=' + cacheData.version + ', expected=' + LOCAL_CACHE_VERSION + ')';
                     return false;
                 }
                 if (cacheData.userId !== currentUser.uid) {
                     try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Cache] User mismatch, ignoring cache'); } catch (e) {}
+                    __lastCacheLoadDebugReason = 'user-mismatch';
                     return false;
                 }
                 try {
                     const code = getLanguageCode(learningLanguage);
                     const cacheLang = cacheData.lang ? String(cacheData.lang) : 'da';
-                    if (cacheLang !== code) return false;
+                    if (cacheLang !== code) { __lastCacheLoadDebugReason = 'lang-mismatch (cache=' + cacheLang + ', current=' + code + ')'; return false; }
                 } catch (e) {}
 
                 const words = await idbGetAllWords(scope);
-                if (!Array.isArray(words) || words.length === 0) return false;
+                if (!Array.isArray(words) || words.length === 0) { __lastCacheLoadDebugReason = 'empty-words-in-idb (meta said count=' + cacheData.count + ')'; return false; }
                 localWordsCache = words;
                 __idbKnownWordIds = new Set(words.map(w => w && w.id).filter(Boolean));
 
@@ -4962,8 +4965,10 @@
 
                 rebuildSearchIndexes();
                 try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log(`[Cache] Loaded ${localWordsCache.length} words from IndexedDB`); } catch (e) {}
+                __lastCacheLoadDebugReason = 'success (' + words.length + ' words)';
                 return true;
             } catch (e) {
+                __lastCacheLoadDebugReason = 'EXCEPTION: ' + (e && e.message);
                 alert("خطای کش محلی: " + e.message);
                 warnThrottled('cache_load_indexeddb', '[Cache] Failed to load from IndexedDB:', e.message);
                 return false;
@@ -13986,6 +13991,19 @@ Conversation History:
             // 🚀 ابتدا از IndexedDB لود کن برای نمایش فوری (بدون محدودیت تعداد کلمات)
             const hadLocalCache = await loadLocalWordsCache();
             const hadDashboardCache = loadDashboardCacheFromLocal();
+            // 🔍 DEBUG موقت: این alert برای پیدا کردن دقیق علت خالی بودن دیتای آفلاینه.
+            // بعد از پیدا شدن مشکل حتماً حذفش کن.
+            try {
+                alert(
+                    '[DEBUG STARTUP]\n' +
+                    'currentUser: ' + (currentUser ? currentUser.uid : 'NULL') + '\n' +
+                    'آنلاین بودن (navigator.onLine): ' + navigator.onLine + '\n' +
+                    'hadLocalCache (از IndexedDB): ' + hadLocalCache + '\n' +
+                    'دلیل دقیق: ' + __lastCacheLoadDebugReason + '\n' +
+                    'تعداد کلمات در حافظه: ' + (Array.isArray(localWordsCache) ? localWordsCache.length : 'آرایه نیست') + '\n' +
+                    'wordsCollectionRef آماده: ' + !!wordsCollectionRef
+                );
+            } catch (e) {}
             if (hadLocalCache || hadDashboardCache) {
                 try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Startup] Instant display from localStorage cache'); } catch (e) {}
                 // تغییر به اجرا فوری برای حذف هرگونه تأخیر در شروع
