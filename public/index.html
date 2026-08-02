@@ -3814,6 +3814,7 @@
             __firestoreCacheConfigured = true;
         } catch (e) {
             console.warn("Could not enable Firestore persistence", e);
+            alert("خطا در راه‌اندازی دیتابیس آفلاین (کش):\n" + (e.message || String(e)));
             db = getFirestore(app);
         }
 
@@ -4963,6 +4964,7 @@
                 try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log(`[Cache] Loaded ${localWordsCache.length} words from IndexedDB`); } catch (e) {}
                 return true;
             } catch (e) {
+                alert("خطای کش محلی: " + e.message);
                 warnThrottled('cache_load_indexeddb', '[Cache] Failed to load from IndexedDB:', e.message);
                 return false;
             }
