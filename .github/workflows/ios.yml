@@ -27,7 +27,7 @@ jobs:
       run: |
         xcodebuild -project ios/App/App.xcodeproj \
                    -scheme App \
-                   -configuration Release \
+                   -configuration Debug \
                    -sdk iphoneos \
                    -derivedDataPath derived_data \
                    CODE_SIGN_IDENTITY="" \
@@ -36,7 +36,7 @@ jobs:
 
     - name: Create IPA payload
       run: |
-        cd derived_data/Build/Products/Release-iphoneos
+        cd derived_data/Build/Products/Debug-iphoneos
         mkdir Payload
         mv App.app Payload/
         zip -qry FACIT.ipa Payload
@@ -45,4 +45,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: FACIT-iOS-App
-        path: derived_data/Build/Products/Release-iphoneos/FACIT.ipa
+        path: derived_data/Build/Products/Debug-iphoneos/FACIT.ipa
