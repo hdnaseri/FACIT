@@ -4876,6 +4876,32 @@
 
         // Load words cache from IndexedDB for instant startup (بدون محدودیت تعداد کلمات)
         // نکته: بارگذاری IndexedDB async هست (برخلاف localStorage قدیمی)، پس این تابع باید await شود.
+        // 🚀 اجرای یک‌باره migration/sanitization برای هر نسخه cache (به‌جای هر بار باز شدن اپ یا هر بار fire شدن snapshot)
+        async function runWordsMigrationOnceIfNeeded(words) {
+            if (!currentUser || !Array.isArray(words) || words.length === 0) return;
+            try {
+                const scope = getLocalCacheKey(LOCAL_WORDS_CACHE_KEY);
+                const migFlagKey = scope + '_migrated_v' + LOCAL_CACHE_VERSION;
+                const alreadyMigrated = await idbGetMeta(migFlagKey);
+                if (alreadyMigrated) return;
+                try {
+                    const fixes = migrateBadAtArticleTermsInWordsCache(words);
+                    if (Array.isArray(fixes) && fixes.length > 0) {
+                        try { saveLocalWordsCache(); } catch (e) {}
+                        try { persistBadAtArticleFixesToFirestore(fixes); } catch (e) {}
+                    }
+                } catch (e) {}
+                try {
+                    const collocationFixes = sanitizeInvalidCollocationsInWordsCache(words);
+                    if (Array.isArray(collocationFixes) && collocationFixes.length > 0) {
+                        try { saveLocalWordsCache(); } catch (e) {}
+                        try { persistInvalidCollocationFixesToFirestore(collocationFixes); } catch (e) {}
+                    }
+                } catch (e) {}
+                try { await idbSetMeta(migFlagKey, true); } catch (e) {}
+            } catch (e) {}
+        }
+
         async function loadLocalWordsCache() {
             if (!currentUser) return false;
             try {
@@ -4912,26 +4938,7 @@
                 }
 
                 // 🚀 بهینه‌سازی: migration/sanitization فقط یک‌بار برای هر نسخه اجرا می‌شود، نه هر بار باز شدن اپ
-                // (این دو تابع روی کل آرایه کلمات اسکن می‌کنند و علت اصلی لگ startup بودند)
-                const migFlagKey = scope + '_migrated_v' + LOCAL_CACHE_VERSION;
-                const alreadyMigrated = await idbGetMeta(migFlagKey);
-                if (!alreadyMigrated) {
-                    try {
-                        const fixes = migrateBadAtArticleTermsInWordsCache(localWordsCache);
-                        if (Array.isArray(fixes) && fixes.length > 0) {
-                            try { saveLocalWordsCache(); } catch (e) {}
-                            try { persistBadAtArticleFixesToFirestore(fixes); } catch (e) {}
-                        }
-                    } catch (e) {}
-                    try {
-                        const collocationFixes = sanitizeInvalidCollocationsInWordsCache(localWordsCache);
-                        if (Array.isArray(collocationFixes) && collocationFixes.length > 0) {
-                            try { saveLocalWordsCache(); } catch (e) {}
-                            try { persistInvalidCollocationFixesToFirestore(collocationFixes); } catch (e) {}
-                        }
-                    } catch (e) {}
-                    try { await idbSetMeta(migFlagKey, true); } catch (e) {}
-                }
+                await runWordsMigrationOnceIfNeeded(localWordsCache);
 
                 rebuildSearchIndexes();
                 try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log(`[Cache] Loaded ${localWordsCache.length} words from IndexedDB`); } catch (e) {}
@@ -14008,18 +14015,9 @@ Conversation History:
 
                 try { __wordsCacheFresh = true; __reviewBadgeLockedToServer = false; } catch (e) {}
 
-                try {
-                    const fixes = migrateBadAtArticleTermsInWordsCache(localWordsCache);
-                    if (Array.isArray(fixes) && fixes.length > 0) {
-                        try { persistBadAtArticleFixesToFirestore(fixes); } catch (e) {}
-                    }
-                } catch (e) {}
-                try {
-                    const collocationFixes = sanitizeInvalidCollocationsInWordsCache(localWordsCache);
-                    if (Array.isArray(collocationFixes) && collocationFixes.length > 0) {
-                        try { persistInvalidCollocationFixesToFirestore(collocationFixes); } catch (e) {}
-                    }
-                } catch (e) {}
+                // 🚀 این اسکن سنگین قبلاً هر بار که snapshot fire می‌شد (یعنی تقریباً هر بار باز شدن اپ)
+                // روی کل آرایه اجرا می‌شد. الان مثل مسیر IndexedDB فقط یک‌بار برای هر نسخه اجرا می‌شود.
+                runWordsMigrationOnceIfNeeded(localWordsCache).catch(() => {});
 
                 try { scheduleSaveLocalCache(); } catch (e) {}
                 try { scheduleRenderRecentSearches(80); } catch (e) {}
