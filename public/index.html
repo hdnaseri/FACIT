@@ -24223,8 +24223,10 @@ Example:
                     await refreshRecentSearchesUI();
                 } else if (activeTabId === 'settings-tab') {
                     checkForBackupReminder();
-                    renderWordUpdateSettingsSection();
-                    updateComprehensiveDbTotalCountBadge();
+                    setTimeout(() => {
+                        renderWordUpdateSettingsSection();
+                        updateComprehensiveDbTotalCountBadge();
+                    }, 300);
                 } else if (activeTabId === 'practice-tab') {
                     try { stopQuickModeTimers(); } catch (e) {}
                     try {
@@ -24262,15 +24264,15 @@ Example:
                     updateReviewQueue();
                     ensurePracticeReviewStarted();
                 } else if (activeTabId === 'dashboard-tab') {
-                    // درخواست بروزرسانی فوری داشبورد
-                    scheduleUpdateDashboard(0);
+                    // Use a delay to allow the tab transition animation to complete smoothly before heavy rendering
+                    scheduleUpdateDashboard(300);
 
                     // لود داده‌ها در پس‌زمینه و سپس بروزرسانی مجدد نمودار
                     reloadWordsCache()
                         .then(() => {
                             // اگر هنوز در تب داشبورد هستیم، نمودار را آپدیت کن
                             if (document.getElementById('dashboard-tab').classList.contains('active')) {
-                                scheduleUpdateDashboard(0);
+                                scheduleUpdateDashboard(150);
                             }
                         })
                         .catch(e => console.warn('[Dashboard] Reload words failed:', e));
