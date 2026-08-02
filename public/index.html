@@ -4261,6 +4261,86 @@
             'به سوی', 'از طرف', 'به منظور', 'بر روی', 'توسط', 'از طریق'
         ]);
 
+        // ==== IndexedDB local-first storage برای کلمات (بدون محدودیت حجم/تعداد، بدون بلاک UI) ====
+        const FACIT_IDB_NAME = 'facit_local_db';
+        const FACIT_IDB_VERSION = 1;
+        let __facitIdbPromise = null;
+        function openFacitIDB() {
+            if (__facitIdbPromise) return __facitIdbPromise;
+            __facitIdbPromise = new Promise((resolve, reject) => {
+                try {
+                    const req = indexedDB.open(FACIT_IDB_NAME, FACIT_IDB_VERSION);
+                    req.onupgradeneeded = (e) => {
+                        const dbx = e.target.result;
+                        if (!dbx.objectStoreNames.contains('words')) {
+                            const store = dbx.createObjectStore('words', { keyPath: 'ck' });
+                            store.createIndex('scope', 'scope', { unique: false });
+                        }
+                        if (!dbx.objectStoreNames.contains('meta')) {
+                            dbx.createObjectStore('meta', { keyPath: 'key' });
+                        }
+                    };
+                    req.onsuccess = (e) => resolve(e.target.result);
+                    req.onerror = (e) => reject(e.target.error);
+                } catch (e) { reject(e); }
+            });
+            return __facitIdbPromise;
+        }
+        async function idbClearScope(scope) {
+            const dbx = await openFacitIDB();
+            return new Promise((resolve, reject) => {
+                const tx = dbx.transaction('words', 'readwrite');
+                const idx = tx.objectStore('words').index('scope');
+                const req = idx.openKeyCursor(IDBKeyRange.only(scope));
+                req.onsuccess = (e) => {
+                    const cursor = e.target.result;
+                    if (cursor) { tx.objectStore('words').delete(cursor.primaryKey); cursor.continue(); }
+                };
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+        async function idbPutWords(scope, words) {
+            if (!Array.isArray(words) || words.length === 0) return;
+            const dbx = await openFacitIDB();
+            return new Promise((resolve, reject) => {
+                const tx = dbx.transaction('words', 'readwrite');
+                const store = tx.objectStore('words');
+                for (const w of words) {
+                    if (!w || !w.id) continue;
+                    store.put({ ck: `${scope}_${w.id}`, scope, data: w });
+                }
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+        async function idbGetAllWords(scope) {
+            const dbx = await openFacitIDB();
+            return new Promise((resolve, reject) => {
+                const tx = dbx.transaction('words', 'readonly');
+                const req = tx.objectStore('words').index('scope').getAll(IDBKeyRange.only(scope));
+                req.onsuccess = () => resolve((req.result || []).map(r => r.data));
+                req.onerror = () => reject(req.error);
+            });
+        }
+        async function idbSetMeta(key, value) {
+            const dbx = await openFacitIDB();
+            return new Promise((resolve, reject) => {
+                const tx = dbx.transaction('meta', 'readwrite');
+                tx.objectStore('meta').put({ key, value });
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+        async function idbGetMeta(key) {
+            const dbx = await openFacitIDB();
+            return new Promise((resolve, reject) => {
+                const req = dbx.transaction('meta', 'readonly').objectStore('meta').get(key);
+                req.onsuccess = () => resolve(req.result ? req.result.value : null);
+                req.onerror = () => reject(req.error);
+            });
+        }
+
         const LOCAL_WORDS_CACHE_KEY = 'facit_words_cache_v3';
         const LOCAL_CACHE_TIMESTAMP_KEY = 'facit_cache_timestamp';
         const LOCAL_DASHBOARD_CACHE_KEY = 'facit_dashboard_cache_v3';
@@ -4757,106 +4837,85 @@
             }, Math.max(0, Number(delay) || 0));
         }
 
-        // Save words cache to localStorage (with size limit)
-        // 🚀 بهینه‌سازی: استفاده از requestIdleCallback برای عدم بلاک main thread
+        // Save words cache to IndexedDB (بدون محدودیت تعداد/حجم)
+        // 🚀 استفاده از requestIdleCallback برای عدم بلاک main thread + IndexedDB به‌جای localStorage
+        let __savingWordsCacheInFlight = false;
+        let __saveWordsCachePending = false;
         function saveLocalWordsCache() {
             if (!currentUser) return;
-            const _doSave = () => {
+            const _doSave = async () => {
+                if (__savingWordsCacheInFlight) { __saveWordsCachePending = true; return; }
+                __savingWordsCacheInFlight = true;
                 try {
-                    // محدودیت هوشمند: تا 1500 کلمه یا 2MB هرکدام زودتر (کاهش از 3000)
-                    const maxWords = 1500;
-                    const cacheData = {
+                    const scope = getLocalCacheKey(LOCAL_WORDS_CACHE_KEY);
+                    const words = Array.isArray(localWordsCache) ? localWordsCache : [];
+                    await idbClearScope(scope);
+                    await idbPutWords(scope, words);
+                    await idbSetMeta(scope + '_meta', {
                         version: LOCAL_CACHE_VERSION,
                         userId: currentUser.uid,
                         lang: getLanguageCode(learningLanguage),
                         timestamp: Date.now(),
-                        words: localWordsCache.slice(0, maxWords)
-                    };
-                    const json = JSON.stringify(cacheData);
-                    // بررسی سایز قبل از ذخیره (حداکثر 2MB)
-                    if (json.length > 2 * 1024 * 1024) {
-                        // کاهش تعداد تا زیر 2MB
-                        const reducedWords = localWordsCache.slice(0, Math.floor(maxWords / 2));
-                        cacheData.words = reducedWords;
-                        localStorage.setItem(getLocalCacheKey(LOCAL_WORDS_CACHE_KEY), JSON.stringify(cacheData));
-                        try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log(`[Cache] Saved ${reducedWords.length} words (reduced) to localStorage`); } catch (e) {}
-                    } else {
-                        localStorage.setItem(getLocalCacheKey(LOCAL_WORDS_CACHE_KEY), json);
-                        try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log(`[Cache] Saved ${cacheData.words.length} words to localStorage`); } catch (e) {}
-                    }
+                        count: words.length
+                    });
+                    try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log(`[Cache] Saved ${words.length} words to IndexedDB`); } catch (e) {}
                 } catch (e) {
-                    warnThrottled('cache_save_local_storage', '[Cache] Failed to save to localStorage:', e.message);
-                    // در صورت خطا، سعی کن با تعداد کمتر ذخیره کن
-                    try {
-                        const fallbackData = {
-                            version: LOCAL_CACHE_VERSION,
-                            userId: currentUser.uid,
-                            lang: getLanguageCode(learningLanguage),
-                            timestamp: Date.now(),
-                            words: localWordsCache.slice(0, 500)
-                        };
-                        localStorage.setItem(getLocalCacheKey(LOCAL_WORDS_CACHE_KEY), JSON.stringify(fallbackData));
-                        try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Cache] Fallback: Saved 500 words'); } catch (e) {}
-                    } catch (e2) {
-                        console.error('[Cache] Complete failure, clearing cache');
-                        localStorage.removeItem(getLocalCacheKey(LOCAL_WORDS_CACHE_KEY));
-                    }
+                    warnThrottled('cache_save_indexeddb', '[Cache] Failed to save to IndexedDB:', e.message);
+                } finally {
+                    __savingWordsCacheInFlight = false;
+                    if (__saveWordsCachePending) { __saveWordsCachePending = false; saveLocalWordsCache(); }
                 }
             };
             // 🚀 اجرا در زمان بیکاری CPU برای جلوگیری از فریز UI
             if (typeof requestIdleCallback === 'function') {
-                requestIdleCallback(_doSave, { timeout: 3000 });
+                requestIdleCallback(() => { _doSave(); }, { timeout: 3000 });
             } else {
-                setTimeout(_doSave, 100);
+                setTimeout(() => { _doSave(); }, 100);
             }
         }
 
-        // Load words cache from localStorage for instant startup
-        function loadLocalWordsCache() {
+        // Load words cache from IndexedDB for instant startup (بدون محدودیت تعداد کلمات)
+        // نکته: بارگذاری IndexedDB async هست (برخلاف localStorage قدیمی)، پس این تابع باید await شود.
+        async function loadLocalWordsCache() {
             if (!currentUser) return false;
             try {
-                const myKey = getLocalCacheKey(LOCAL_WORDS_CACHE_KEY);
-                let json = localStorage.getItem(myKey);
-                if (!json) {
-                    try {
-                        const code = getLanguageCode(learningLanguage);
-                        if (code === 'da') {
-                            const legacy = localStorage.getItem('facit_words_cache');
-                            if (legacy) {
-                                json = legacy;
-                                try { localStorage.setItem(myKey, legacy); } catch (e) {}
-                            }
-                        }
-                    } catch (e) {}
-                }
-                if (!json) return false;
+                const scope = getLocalCacheKey(LOCAL_WORDS_CACHE_KEY);
+                const cacheData = await idbGetMeta(scope + '_meta');
 
-                const cacheData = JSON.parse(json);
+                if (!cacheData) return false;
 
                 // Validate cache
                 if (cacheData.version !== LOCAL_CACHE_VERSION) {
                     try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Cache] Version mismatch, clearing old cache'); } catch (e) {}
-                    localStorage.removeItem(myKey);
+                    try { await idbClearScope(scope); } catch (e) {}
                     return false;
                 }
-
                 if (cacheData.userId !== currentUser.uid) {
                     try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Cache] User mismatch, ignoring cache'); } catch (e) {}
                     return false;
                 }
-
                 try {
                     const code = getLanguageCode(learningLanguage);
                     const cacheLang = cacheData.lang ? String(cacheData.lang) : 'da';
                     if (cacheLang !== code) return false;
                 } catch (e) {}
 
-                // Check if cache is too old (24 hours)
-                const cacheAge = Date.now() - cacheData.timestamp;
-                if (cacheAge > 24 * 60 * 60 * 1000) {
+                const words = await idbGetAllWords(scope);
+                if (!Array.isArray(words) || words.length === 0) return false;
+                localWordsCache = words;
+
+                // Cache is too old (24 hours) → still load for instant display, caller triggers refresh
+                const cacheAge = Date.now() - (cacheData.timestamp || 0);
+                const isStale = cacheAge > 24 * 60 * 60 * 1000;
+                if (isStale) {
                     try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Cache] Cache too old, will refresh from server'); } catch (e) {}
-                    // Still load it for instant display, but trigger refresh
-                    localWordsCache = cacheData.words;
+                }
+
+                // 🚀 بهینه‌سازی: migration/sanitization فقط یک‌بار برای هر نسخه اجرا می‌شود، نه هر بار باز شدن اپ
+                // (این دو تابع روی کل آرایه کلمات اسکن می‌کنند و علت اصلی لگ startup بودند)
+                const migFlagKey = scope + '_migrated_v' + LOCAL_CACHE_VERSION;
+                const alreadyMigrated = await idbGetMeta(migFlagKey);
+                if (!alreadyMigrated) {
                     try {
                         const fixes = migrateBadAtArticleTermsInWordsCache(localWordsCache);
                         if (Array.isArray(fixes) && fixes.length > 0) {
@@ -4871,30 +4930,14 @@
                             try { persistInvalidCollocationFixesToFirestore(collocationFixes); } catch (e) {}
                         }
                     } catch (e) {}
-                    rebuildSearchIndexes();
-                    return true; // Return true but caller should still refresh
+                    try { await idbSetMeta(migFlagKey, true); } catch (e) {}
                 }
 
-                localWordsCache = cacheData.words;
-                try {
-                    const fixes = migrateBadAtArticleTermsInWordsCache(localWordsCache);
-                    if (Array.isArray(fixes) && fixes.length > 0) {
-                        try { saveLocalWordsCache(); } catch (e) {}
-                        try { persistBadAtArticleFixesToFirestore(fixes); } catch (e) {}
-                    }
-                } catch (e) {}
-                try {
-                    const collocationFixes = sanitizeInvalidCollocationsInWordsCache(localWordsCache);
-                    if (Array.isArray(collocationFixes) && collocationFixes.length > 0) {
-                        try { saveLocalWordsCache(); } catch (e) {}
-                        try { persistInvalidCollocationFixesToFirestore(collocationFixes); } catch (e) {}
-                    }
-                } catch (e) {}
                 rebuildSearchIndexes();
-                try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log(`[Cache] Loaded ${localWordsCache.length} words from localStorage`); } catch (e) {}
+                try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log(`[Cache] Loaded ${localWordsCache.length} words from IndexedDB`); } catch (e) {}
                 return true;
             } catch (e) {
-                warnThrottled('cache_load_local_storage', '[Cache] Failed to load from localStorage:', e.message);
+                warnThrottled('cache_load_indexeddb', '[Cache] Failed to load from IndexedDB:', e.message);
                 return false;
             }
         }
@@ -13906,14 +13949,14 @@ Conversation History:
         });
         document.getElementById('logout-btn').addEventListener('click', () => { signOut(auth); mainApp.classList.add('hidden'); authScreen.classList.remove('hidden'); try { document.getElementById('bottom-nav')?.classList.add('hidden'); } catch (e) {} });
         // بهینه‌سازی مهم: listener با limit برای دیتاست بزرگ (10k+ کلمه)
-        function setupRealtimeListener() {
+        async function setupRealtimeListener() {
             try { if (wordsUnsubscribe) wordsUnsubscribe(); } catch (e) {}
             wordsUnsubscribe = null;
             const sessionAtStart = __authSessionSeq;
 			try { __wordsCacheFresh = false; } catch (e) {}
 
-            // 🚀 ابتدا از localStorage لود کن برای نمایش فوری
-            const hadLocalCache = loadLocalWordsCache();
+            // 🚀 ابتدا از IndexedDB لود کن برای نمایش فوری (بدون محدودیت تعداد کلمات)
+            const hadLocalCache = await loadLocalWordsCache();
             const hadDashboardCache = loadDashboardCacheFromLocal();
             if (hadLocalCache || hadDashboardCache) {
                 try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Startup] Instant display from localStorage cache'); } catch (e) {}
@@ -14633,11 +14676,11 @@ Conversation History:
         async function ensureWordsCacheLoaded() {
             if (!wordsCollectionRef) return;
 
-            // 🚀 ابتدا از localStorage لود کن (instant)
+            // 🚀 ابتدا از IndexedDB لود کن (بدون بلاک UI)
             if (localWordsCache.length === 0) {
-                const hadLocalCache = loadLocalWordsCache();
+                const hadLocalCache = await loadLocalWordsCache();
                 if (hadLocalCache) {
-                    try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Cache] Loaded from localStorage, will sync with server'); } catch (e) {}
+                    try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Cache] Loaded from IndexedDB, will sync with server'); } catch (e) {}
                 }
             }
 
@@ -31640,7 +31683,7 @@ Example:
 				if (!word) {
 					try {
 						if ((localWordsCache?.length || 0) === 0 && (wordIdIndex?.size || 0) === 0) {
-							loadLocalWordsCache();
+							await loadLocalWordsCache();
 						}
 						word = getLocalWordById(wordId);
 					} catch (e) {}
