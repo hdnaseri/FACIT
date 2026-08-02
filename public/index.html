@@ -14008,6 +14008,18 @@ Conversation History:
                 try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Startup] Instant display from localStorage cache'); } catch (e) {}
                 // تغییر به اجرا فوری برای حذف هرگونه تأخیر در شروع
                 updateAllUI();
+                // 🚀 صرف‌نظر از اینکه کدوم تب فعاله، لیست بانک/داشبورد/فلش‌کارت رو با داده‌ی واقعی
+                // آماده می‌کنیم تا هر وقت کاربر تب رو عوض کرد، دیگه خالی/قدیمی نباشه (بدون نیاز به ری‌استارت اپ)
+                try { renderDeck(); } catch (e) {}
+                try { updateDashboard(); } catch (e) {}
+                try {
+                    const noReviewsMsg = document.getElementById('no-reviews-message');
+                    const wasShowingEmptyState = noReviewsMsg && !noReviewsMsg.classList.contains('hidden');
+                    updateReviewQueue();
+                    if (wasShowingEmptyState && Array.isArray(reviewQueue) && reviewQueue.length > 0 && !currentReviewCard) {
+                        startNextReview();
+                    }
+                } catch (e) {}
             }
 
             if (!wordsCollectionRef) return;
@@ -14122,8 +14134,19 @@ Conversation History:
             // flash card UI فقط اگر tab فعال بود
             if (document.getElementById('practice-tab')?.classList.contains('active')) {
                 requestIdleCallback(() => {
+                    const prevQueueLen = Array.isArray(reviewQueue) ? reviewQueue.length : 0;
                     updateReviewQueue(); // فقط queue را refresh کن (نه startNextReview)
-                    // توجه: startNextReview را اینجا صدا نمی‌زنیم چون کاربر در حال مرور است
+                    // 🚀 اگه قبلاً پیام «امروز تمام شد» نشون داده شده بود (چون کش هنوز لود نشده بود)
+                    // و الان با آمدن داده واقعی، کارتی برای مرور پیدا شد، باید واقعاً نمایشش بدیم؛
+                    // وگرنه کاربر همیشه پیام خالی رو می‌بینه تا اپ رو ری‌استارت کنه.
+                    try {
+                        const noReviewsMsg = document.getElementById('no-reviews-message');
+                        const wasShowingEmptyState = noReviewsMsg && !noReviewsMsg.classList.contains('hidden');
+                        const nowHasCards = Array.isArray(reviewQueue) && reviewQueue.length > 0;
+                        if (wasShowingEmptyState && nowHasCards && !currentReviewCard) {
+                            startNextReview();
+                        }
+                    } catch (e) {}
                 }, { timeout: 200 });
             }
             // dashboard فقط اگر نمایش داده شود
