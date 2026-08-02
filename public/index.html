@@ -4866,6 +4866,27 @@
                 try {
                     const scope = getLocalCacheKey(LOCAL_WORDS_CACHE_KEY);
                     const words = Array.isArray(localWordsCache) ? localWordsCache : [];
+
+                    // 🚀 محافظت حیاتی: هیچ‌وقت یک کش خوب و پر رو با یک آرایه خالی بازنویسی نکن.
+                    // اگه localWordsCache به‌طور موقت/گذرا خالی شده باشه (مثلاً وسط سوییچ زبان،
+                    // یا یک لحظه‌ی گذرای auth) و دقیقاً همون لحظه رفتن به پس‌زمینه ذخیره رو تریگر کنه،
+                    // نباید داده‌ی خوب قبلی از بین بره. این دقیقاً همون باگی بود که کش ۱۰۶۶ کلمه‌ای رو صفر کرد.
+                    if (words.length === 0 && __idbKnownWordIds && __idbKnownWordIds.size > 0) {
+                        try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Cache] Skipped save: localWordsCache is empty but IndexedDB has ' + __idbKnownWordIds.size + ' known words — refusing to wipe it'); } catch (e) {}
+                        return;
+                    }
+                    if (words.length === 0) {
+                        // حتی اگه __idbKnownWordIds خالی باشه (مثلاً بعد از ری‌استارت اپ که هنوز لود نکرده)،
+                        // قبل از ذخیره، مستقیم از IndexedDB چک کن که واقعاً چیزی اونجا نیست
+                        try {
+                            const existingMeta = await idbGetMeta(scope + '_meta');
+                            if (existingMeta && Number(existingMeta.count) > 0) {
+                                try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Cache] Skipped save: in-memory cache empty but IndexedDB already has ' + existingMeta.count + ' words — refusing to wipe it'); } catch (e) {}
+                                return;
+                            }
+                        } catch (e) {}
+                    }
+
                     // 🚀 یک تراکنش اتمیک واحد برای words+meta: یا کامل commit می‌شه یا هیچی،
                     // پس اگه اپ وسط ذخیره‌سازی suspend بشه، دیتابیس خالی/نصفه نمی‌مونه.
                     const savedIds = await idbSaveWordsAndMeta(scope, words, __idbKnownWordIds, {
