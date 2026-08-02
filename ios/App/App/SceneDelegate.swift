@@ -8,8 +8,16 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene else { return }
 
         window = UIWindow(windowScene: windowScene)
-        window?.rootViewController = CAPBridgeViewController()
+        let bridgeVC = CAPBridgeViewController()
+        window?.rootViewController = bridgeVC
         window?.makeKeyAndVisible()
+
+        // 🚀 فعال کردن Web Inspector حتی در build های Release
+        // (پیش‌فرض Capacitor فقط در Debug فعاله؛ چون build از GitHub Actions با -configuration Release میاد،
+        // بدون این خط هیچ‌وقت اپ توی لیست Safari/Chrome remote debugging ظاهر نمی‌شه)
+        if #available(iOS 16.4, *) {
+            bridgeVC.webView?.isInspectable = true
+        }
 
         SceneDelegateProxy.shared.scene(scene, willConnectTo: session, options: connectionOptions)
     }
