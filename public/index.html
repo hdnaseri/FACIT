@@ -1757,7 +1757,7 @@
                     setTimeout(updateOrientationHandling, 50);
                 } else {
                     stopPortraitSafetyInterval();
-                    try { saveLocalWordsCache(); } catch (e) {}
+                    try { saveLocalWordsCache(true); } catch (e) {}
                 }
             });
 
@@ -4286,6 +4286,7 @@
             });
             return __facitIdbPromise;
         }
+        // فقط برای موارد نادر invalidation کامل (تغییر نسخه cache) استفاده می‌شه، نه در مسیر داغ ذخیره‌سازی
         async function idbClearScope(scope) {
             const dbx = await openFacitIDB();
             return new Promise((resolve, reject) => {
@@ -4300,20 +4301,6 @@
                 tx.onerror = () => reject(tx.error);
             });
         }
-        async function idbPutWords(scope, words) {
-            if (!Array.isArray(words) || words.length === 0) return;
-            const dbx = await openFacitIDB();
-            return new Promise((resolve, reject) => {
-                const tx = dbx.transaction('words', 'readwrite');
-                const store = tx.objectStore('words');
-                for (const w of words) {
-                    if (!w || !w.id) continue;
-                    store.put({ ck: `${scope}_${w.id}`, scope, data: w });
-                }
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        }
         async function idbGetAllWords(scope) {
             const dbx = await openFacitIDB();
             return new Promise((resolve, reject) => {
@@ -4321,6 +4308,32 @@
                 const req = tx.objectStore('words').index('scope').getAll(IDBKeyRange.only(scope));
                 req.onsuccess = () => resolve((req.result || []).map(r => r.data));
                 req.onerror = () => reject(req.error);
+            });
+        }
+        // 🚀 ذخیره کلمات + متادیتا در یک تراکنش اتمیک واحد (words + meta با هم)
+        // این خیلی مهمه: قبلاً clear و write دو تراکنش جدا بودن؛ اگه اپ درست وسط این دو
+        // به پس‌زمینه می‌رفت (که در iOS خیلی سریع اتفاق می‌افته)، دیتابیس محلی خالی می‌موند
+        // و هر بار مجبور می‌شد کامل از فایربیس بگیره. الان یا کل تراکنش commit می‌شه یا هیچ‌کدوم.
+        // حذف رکوردهای قدیمی هم به‌جای cursor روی کل استور، فقط روی idهای واقعاً حذف‌شده (targeted) انجام می‌شه.
+        async function idbSaveWordsAndMeta(scope, words, knownIds, metaValue) {
+            const dbx = await openFacitIDB();
+            const currentIds = new Set();
+            for (const w of words) { if (w && w.id) currentIds.add(w.id); }
+            const toDelete = [];
+            if (knownIds) {
+                for (const id of knownIds) { if (!currentIds.has(id)) toDelete.push(id); }
+            }
+            return new Promise((resolve, reject) => {
+                const tx = dbx.transaction(['words', 'meta'], 'readwrite');
+                const store = tx.objectStore('words');
+                for (const id of toDelete) { store.delete(`${scope}_${id}`); }
+                for (const w of words) {
+                    if (!w || !w.id) continue;
+                    store.put({ ck: `${scope}_${w.id}`, scope, data: w });
+                }
+                tx.objectStore('meta').put({ key: scope + '_meta', value: metaValue });
+                tx.oncomplete = () => resolve(currentIds);
+                tx.onerror = () => reject(tx.error);
             });
         }
         async function idbSetMeta(key, value) {
@@ -4340,6 +4353,8 @@
                 req.onerror = () => reject(req.error);
             });
         }
+        // شناسه‌های کلماتی که آخرین بار در IndexedDB بودن (برای محاسبه ارزان حذف‌شده‌ها بدون cursor)
+        let __idbKnownWordIds = null;
 
         const LOCAL_WORDS_CACHE_KEY = 'facit_words_cache_v3';
         const LOCAL_CACHE_TIMESTAMP_KEY = 'facit_cache_timestamp';
@@ -4841,7 +4856,8 @@
         // 🚀 استفاده از requestIdleCallback برای عدم بلاک main thread + IndexedDB به‌جای localStorage
         let __savingWordsCacheInFlight = false;
         let __saveWordsCachePending = false;
-        function saveLocalWordsCache() {
+        // immediate=true: بدون صبر برای idle time — برای لحظه رفتن به پس‌زمینه که ممکنه اپ فوری suspend بشه
+        function saveLocalWordsCache(immediate) {
             if (!currentUser) return;
             const _doSave = async () => {
                 if (__savingWordsCacheInFlight) { __saveWordsCachePending = true; return; }
@@ -4849,15 +4865,16 @@
                 try {
                     const scope = getLocalCacheKey(LOCAL_WORDS_CACHE_KEY);
                     const words = Array.isArray(localWordsCache) ? localWordsCache : [];
-                    await idbClearScope(scope);
-                    await idbPutWords(scope, words);
-                    await idbSetMeta(scope + '_meta', {
+                    // 🚀 یک تراکنش اتمیک واحد برای words+meta: یا کامل commit می‌شه یا هیچی،
+                    // پس اگه اپ وسط ذخیره‌سازی suspend بشه، دیتابیس خالی/نصفه نمی‌مونه.
+                    const savedIds = await idbSaveWordsAndMeta(scope, words, __idbKnownWordIds, {
                         version: LOCAL_CACHE_VERSION,
                         userId: currentUser.uid,
                         lang: getLanguageCode(learningLanguage),
                         timestamp: Date.now(),
                         count: words.length
                     });
+                    __idbKnownWordIds = savedIds;
                     try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log(`[Cache] Saved ${words.length} words to IndexedDB`); } catch (e) {}
                 } catch (e) {
                     warnThrottled('cache_save_indexeddb', '[Cache] Failed to save to IndexedDB:', e.message);
@@ -4866,7 +4883,8 @@
                     if (__saveWordsCachePending) { __saveWordsCachePending = false; saveLocalWordsCache(); }
                 }
             };
-            // 🚀 اجرا در زمان بیکاری CPU برای جلوگیری از فریز UI
+            if (immediate) { _doSave(); return; }
+            // 🚀 اجرا در زمان بیکاری CPU برای جلوگیری از فریز UI (فقط برای ذخیره‌های معمولی، نه لحظه بستن اپ)
             if (typeof requestIdleCallback === 'function') {
                 requestIdleCallback(() => { _doSave(); }, { timeout: 3000 });
             } else {
@@ -4929,6 +4947,7 @@
                 const words = await idbGetAllWords(scope);
                 if (!Array.isArray(words) || words.length === 0) return false;
                 localWordsCache = words;
+                __idbKnownWordIds = new Set(words.map(w => w && w.id).filter(Boolean));
 
                 // Cache is too old (24 hours) → still load for instant display, caller triggers refresh
                 const cacheAge = Date.now() - (cacheData.timestamp || 0);
@@ -4959,8 +4978,8 @@
             }, 15000); // 🚀 بهینه‌سازی: از 5 به 15 ثانیه افزایش برای کاهش بار stringify
         }
 
-        window.addEventListener('pagehide', () => { try { saveLocalWordsCache(); } catch (e) {} });
-        window.addEventListener('beforeunload', () => { try { saveLocalWordsCache(); } catch (e) {} });
+        window.addEventListener('pagehide', () => { try { saveLocalWordsCache(true); } catch (e) {} });
+        window.addEventListener('beforeunload', () => { try { saveLocalWordsCache(true); } catch (e) {} });
 
         // 🚀 ذخیره و لود دسته‌بندی‌ها در localStorage
         function saveCategoriesCache() {
@@ -32937,6 +32956,20 @@ Return ONLY the word/phrase itself. Nothing else.`;
 		}
 
 		function updateDashboard() {
+			try {
+				_updateDashboardInner();
+			} catch (e) {
+				// 🚀 خودترمیمی: اگه رندر نمودار به هر دلیلی خطا بده، به‌جای اینکه اپ تو حالت خراب بمونه
+				// و همون خطا هر بار تکرار بشه، نمونه‌های چارت رو نابود می‌کنیم تا دفعه بعد از صفر ساخته بشن.
+				try { warnThrottled('dashboard_render_error', '[Dashboard] render failed:', e && e.message); } catch (e2) {}
+				try { if (growthChartInstance) growthChartInstance.destroy(); } catch (e2) {}
+				try { if (statusChartInstance) statusChartInstance.destroy(); } catch (e2) {}
+				growthChartInstance = null;
+				statusChartInstance = null;
+			}
+		}
+
+		function _updateDashboardInner() {
 			const isDashboardActive = document.getElementById('dashboard-tab')?.classList.contains('active');
 			if (!isDashboardActive) return;
 
@@ -33001,7 +33034,8 @@ Return ONLY the word/phrase itself. Nothing else.`;
 				if (!createdAt) return null;
 				if (typeof createdAt.toDate === 'function') {
 					try {
-						return createdAt.toDate();
+						const d = createdAt.toDate();
+						return (d instanceof Date && !isNaN(d.getTime())) ? d : null;
 					} catch (e) {
 						return null;
 					}
@@ -33072,6 +33106,7 @@ Return ONLY the word/phrase itself. Nothing else.`;
 				let sig = 0;
 				const locale = calendarType === 'gregorian' ? 'en-US' : 'fa-IR';
 				for (const dayTimestamp of uniqueDayTimestamps) {
+					if (!Number.isFinite(dayTimestamp)) continue; // 🚀 جلوگیری از RangeError روی Invalid Date در WebKit
 					const entryT = dayMapTotal.get(dayTimestamp);
 					const entryM = dayMapMastered.get(dayTimestamp);
 					cumTotal += entryT ? entryT.t : 0;
