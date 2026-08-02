@@ -24266,16 +24266,6 @@ Example:
                 } else if (activeTabId === 'dashboard-tab') {
                     // Use a delay to allow the tab transition animation to complete smoothly before heavy rendering
                     scheduleUpdateDashboard(300);
-
-                    // لود داده‌ها در پس‌زمینه و سپس بروزرسانی مجدد نمودار
-                    reloadWordsCache()
-                        .then(() => {
-                            // اگر هنوز در تب داشبورد هستیم، نمودار را آپدیت کن
-                            if (document.getElementById('dashboard-tab').classList.contains('active')) {
-                                scheduleUpdateDashboard(150);
-                            }
-                        })
-                        .catch(e => console.warn('[Dashboard] Reload words failed:', e));
                 }
             });
         });
