@@ -27487,10 +27487,40 @@ Example:
                             speakBtn.classList.remove('hidden');
                             setFlashcardAutoPronounceEnabled(flashcardAutoPronounceEnabled, speakBtn);
                             clearFlashcardSpeakClickTimer();
+                            // 🚀 قبلاً از رویداد native ondblclick استفاده می‌شد که روی iOS/WKWebView
+                            // به‌خاطر تاخیر تشخیص تپ خیلی غیرقابل‌اعتماده. الان با مقایسه زمان دو تپ
+                            // پشت‌سرهم روی خود click تشخیص می‌دیم — این روی همه پلتفرم‌ها یکسان کار می‌کنه.
+                            speakBtn.ondblclick = null;
                             speakBtn.onclick = (event) => {
                                 if (event) {
                                     try { event.preventDefault(); } catch (e) {}
                                 }
+                                const nowTs = Date.now();
+                                const prevClickAt = speakBtn._facitLastTapAt || 0;
+                                const isCurrentlyPlaying = speakBtn.classList.contains('text-blue-600');
+                                const isRapidSecondTap = isCurrentlyPlaying || ((nowTs - prevClickAt) < 400);
+                                speakBtn._facitLastTapAt = isRapidSecondTap ? 0 : nowTs;
+
+                                if (isRapidSecondTap) {
+                                    // رفتار دابل‌تپ: فعال/غیرفعال کردن پخش خودکار تلفظ
+                                    clearFlashcardSpeakClickTimer();
+                                    if (flashcardAutoPronounceEnabled) {
+                                        setFlashcardAutoPronounceEnabled(false, speakBtn);
+                                        refreshFlashcardSpeakButtonAvailability(speakBtn, activeReviewCard);
+                                        return;
+                                    }
+                                    setFlashcardAutoPronounceEnabled(true, speakBtn);
+                                    refreshFlashcardSpeakButtonAvailability(speakBtn, activeReviewCard);
+                                    if (currentReviewCard !== activeReviewCard) return;
+                                    if (isQuick) pauseQuickModeTimers();
+                                    playFlashcardPronunciation(activeReviewCard, speakBtn, { showHint: true })
+                                        .catch(() => {})
+                                        .finally(() => {
+                                            if (isQuick && currentReviewCard === activeReviewCard) resumeQuickModeTimers();
+                                        });
+                                    return;
+                                }
+
                                 if (flashcardAutoPronounceEnabled) {
                                     clearFlashcardSpeakClickTimer();
                                     setFlashcardAutoPronounceEnabled(false, speakBtn);
@@ -27509,26 +27539,6 @@ Example:
                                         if (isQuick && currentReviewCard === activeReviewCard) resumeQuickModeTimers();
                                     }
                                 }, 240);
-                            };
-                            speakBtn.ondblclick = (event) => {
-                                if (event) {
-                                    try { event.preventDefault(); } catch (e) {}
-                                }
-                                clearFlashcardSpeakClickTimer();
-                                if (flashcardAutoPronounceEnabled) {
-                                    setFlashcardAutoPronounceEnabled(false, speakBtn);
-                                    refreshFlashcardSpeakButtonAvailability(speakBtn, activeReviewCard);
-                                    return;
-                                }
-                                setFlashcardAutoPronounceEnabled(true, speakBtn);
-                                refreshFlashcardSpeakButtonAvailability(speakBtn, activeReviewCard);
-                                if (currentReviewCard !== activeReviewCard) return;
-                                if (isQuick) pauseQuickModeTimers();
-                                playFlashcardPronunciation(activeReviewCard, speakBtn, { showHint: true })
-                                    .catch(() => {})
-                                    .finally(() => {
-                                        if (isQuick && currentReviewCard === activeReviewCard) resumeQuickModeTimers();
-                                    });
                             };
                         }
 
