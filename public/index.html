@@ -14048,6 +14048,9 @@ Conversation History:
                         startNextReview();
                     }
                 } catch (e) {}
+                // 🚀 «جستجوهای اخیر» قبلاً فقط بعد از رسیدن onSnapshot از فایربیس رفرش می‌شد،
+                // پس تشخیص ذخیره‌شده/موقت بودنشون آفلاین همیشه با وضعیت اولیه (قبل از لود کش) می‌موند.
+                try { scheduleRenderRecentSearches(0); } catch (e) {}
             }
 
             if (!wordsCollectionRef) return;
@@ -14065,6 +14068,15 @@ Conversation History:
                 __wordsSnapshotFirstFired = true;
 
                 if (isFirstSnapshot || changes.length > 50) {
+                    // 🚀 محافظت حیاتی: اگه اولین snapshot خالیه (مثلاً چون آفلاینیم و کش خود فایربیس
+                    // برای این query هنوز چیزی نداره) ولی از قبل (مثلاً از IndexedDB) داده معتبر داریم،
+                    // نباید این داده‌ی خوب رو با یک آرایه خالی جایگزین کنیم. صبر می‌کنیم snapshot واقعی برسه.
+                    const incomingIsEmpty = !snapshot.docs || snapshot.docs.length === 0;
+                    const alreadyHaveGoodData = Array.isArray(localWordsCache) && localWordsCache.length > 0;
+                    if (isFirstSnapshot && incomingIsEmpty && alreadyHaveGoodData) {
+                        try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log('[Firestore] Ignored empty first snapshot — keeping ' + localWordsCache.length + ' already-loaded words'); } catch (e) {}
+                        return;
+                    }
                     // اولین بار یا تغییرات زیاد: بازسازی کامل
                     localWordsCache = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data({ serverTimestamps: 'estimate' }) }));
                     try { rebuildSearchIndexes(); } catch (e) {}
