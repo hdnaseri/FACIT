@@ -4987,6 +4987,13 @@
                 rebuildSearchIndexes();
                 try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log(`[Cache] Loaded ${localWordsCache.length} words from IndexedDB`); } catch (e) {}
                 __lastCacheLoadDebugReason = 'success (' + words.length + ' words)';
+                // 🚀 قبلاً __wordsCacheFresh فقط بعد از جواب گرفتن از سرور true می‌شد، پس بج مرور
+                // همیشه موقع آفلاین قایم می‌موند حتی وقتی داده کامل از IndexedDB لود شده بود.
+                // چون این داده قبلاً یک‌بار واقعاً از فایربیس سینک شده، قابل اعتماده و بج باید نشون داده بشه.
+                try {
+                    __wordsCacheFresh = true;
+                    if (__reviewBadgeInitialized) scheduleUpdateReviewBadge(150);
+                } catch (e) {}
                 return true;
             } catch (e) {
                 __lastCacheLoadDebugReason = 'EXCEPTION: ' + (e && e.message);
@@ -25954,6 +25961,9 @@ Example:
 				try { reviewCountBadge.textContent = ''; reviewCountBadge.classList.add('hidden'); } catch (e) {}
 				__reviewBadgeLockedToServer = false;
 				__reviewBadgeInitialized = true;
+				// 🚀 اگه داده (چه از IndexedDB چه از سرور) از قبل معتبر علامت خورده، همین الان بج رو حساب کن
+				// نه اینکه منتظر یک updateAllUI دیگه بمونیم که ممکنه offline هیچ‌وقت نیاد.
+				if (__wordsCacheFresh) scheduleUpdateReviewBadge(150);
 			} finally {
 				__reviewBadgeInitInFlight = false;
 			}
