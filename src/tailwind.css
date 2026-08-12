@@ -1,3 +1,20 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  /*
+   * Fundamental fix for mixed Persian and Danish text.
+   * By default, bidirectional text might 'bleed' its directionality to neutral characters 
+   * (like parentheses or punctuation) at the boundaries if not strictly isolated.
+   * The 'isolate' keyword forces the browser to treat the element's text as completely
+   * independent of its surrounding context for bidi resolution.
+   */
+  [dir="rtl"], [dir="ltr"] {
+    unicode-bidi: isolate;
+  }
+
+  bdi {
+    unicode-bidi: isolate;
+  }
+}
