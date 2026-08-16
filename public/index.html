@@ -26700,14 +26700,19 @@ Example:
                 return;
             }
 
-            if (preferredCardKey && Array.isArray(reviewQueue) && reviewQueue.length > 0) {
-                const nextIndex = reviewQueue.findIndex((card) => getReviewCardRuntimeKey(card) === preferredCardKey);
-                if (nextIndex > 0) {
-                    const [preferredCard] = reviewQueue.splice(nextIndex, 1);
-                    if (preferredCard) reviewQueue.unshift(preferredCard);
-                }
+            if (preserveCurrentCard && currentReviewCard) {
+                // If we want to preserve the current card (e.g. user just edited it),
+                // do NOT flip it back to front and do NOT call startNextReview.
+                // Just update the currentReviewCard reference to the fresh data.
+                try {
+                    const freshCard = reviewQueue.find(c => getReviewCardRuntimeKey(c) === preferredCardKey);
+                    if (freshCard) currentReviewCard = freshCard;
+                } catch (e) {}
+                try { updateReviewBadge(); } catch (e) {}
+                return;
             }
 
+            // If not preserving (e.g. card was deleted or user answered it), move to next
             try {
                 const flipCard = document.getElementById('review-card-container')?.querySelector('.flip-card');
                 flipCard?.classList.remove('flipped');
@@ -32806,6 +32811,7 @@ Example:
             }
             filteredWords.sort((a, b) => getCreatedAtDateForDeckSort(b.createdAt) - getCreatedAtDateForDeckSort(a.createdAt));
 
+			const prevRenderMode = deckRenderMode;
 			deckRenderMode = isSameRootMode ? 'cognates' : (isSpellingMode ? 'spelling' : (isMeaningMode ? 'meaning' : 'words'));
 			currentFilteredWords = filteredWords;
 			currentCognatesGroups = isSameRootMode ? buildVerbAffixGroupsFromWords(filteredWords) : [];
@@ -32813,8 +32819,13 @@ Example:
 			currentMeaningGroups = isMeaningMode ? buildMeaningGroupsFromWords(filteredWords) : [];
 			renderedWordCount = 0;
 			isRenderingBatch = false;
+			
+			// Preserve scroll position if we are just updating the same view (e.g. background sync)
+			const currentScrollTop = mainContainer.scrollTop;
 			deckList.innerHTML = '';
-			mainContainer.scrollTop = 0;
+			if (deckRenderMode !== prevRenderMode) {
+				mainContainer.scrollTop = 0;
+			}
 
 			if (deckRenderMode === 'cognates') {
 				updateDeckCognatesCountBadge(currentCognatesGroups);
@@ -32830,6 +32841,13 @@ Example:
 			}
 
 			renderWordBatch();
+			
+			// Restore scroll position after batch renders if we stayed in the same mode
+			if (deckRenderMode === prevRenderMode && currentScrollTop > 0) {
+				requestAnimationFrame(() => {
+					mainContainer.scrollTop = currentScrollTop;
+				});
+			}
         }
 
         function renderWordBatch() {
