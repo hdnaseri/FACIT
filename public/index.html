@@ -20615,35 +20615,36 @@ CRITICAL — HOMOGRAPH DISAMBIGUATION: The user was shown multiple unrelated lex
             return false;
         }
 
-        function getPrioritizedExamplesForTerm(examples, ...terms) {
+        function getPrioritizedExamplesForTerm(examples, specificTerms, fallbackTerms = []) {
             const list = normalizeWordExamplesForDisplay(Array.isArray(examples) ? examples : (examples ? [examples] : []));
             if (list.length === 0) return [];
 
-            const rawTerms = [];
-            const prepositionTargets = [];
-            for (const term of terms) {
-                if (Array.isArray(term)) {
-                    term.forEach((item) => {
-                        if (item && typeof item === 'object' && !Array.isArray(item) && (item.anchorText || item.preposition)) {
-                            prepositionTargets.push(item);
-                        } else if (item) {
-                            rawTerms.push(item);
-                        }
-                    });
-                } else if (term && typeof term === 'object' && (term.anchorText || term.preposition)) {
-                    prepositionTargets.push(term);
-                } else if (term) {
-                    rawTerms.push(term);
+            const parseTerms = (input) => {
+                const rawTerms = [];
+                const prepTargets = [];
+                const arr = Array.isArray(input) ? input : (input ? [input] : []);
+                for (const item of arr) {
+                    if (Array.isArray(item)) {
+                        item.forEach((sub) => {
+                            if (sub && typeof sub === 'object' && !Array.isArray(sub) && (sub.anchorText || sub.preposition)) {
+                                prepTargets.push(sub);
+                            } else if (sub) {
+                                rawTerms.push(sub);
+                            }
+                        });
+                    } else if (item && typeof item === 'object' && (item.anchorText || item.preposition)) {
+                        prepTargets.push(item);
+                    } else if (item) {
+                        rawTerms.push(item);
+                    }
                 }
-            }
+                const needles = collectWordTermCandidates(rawTerms).map(v => normalizeText(v)).filter(Boolean);
+                return { needles, needleSet: new Set(needles), prepTargets };
+            };
 
-            const needles = collectWordTermCandidates(rawTerms)
-                .map(v => normalizeText(v))
-                .filter(Boolean);
+            const primary = parseTerms(specificTerms);
+            const fallback = parseTerms(fallbackTerms);
 
-            if (needles.length === 0 && prepositionTargets.length === 0) return list;
-
-            const needleSet = new Set(needles);
             const seenKeys = new Set();
             const out = [];
 
@@ -20658,38 +20659,59 @@ CRITICAL — HOMOGRAPH DISAMBIGUATION: The user was shown multiple unrelated lex
                 out.push(ex);
             };
 
-            // Tier 1: Explicit AI 'for' tag match (highest priority)
-            list.forEach((example) => {
+            const matchForTag = (example, target) => {
                 const rawTag = String(example?.for || '').trim();
-                if (!rawTag) return;
+                if (!rawTag) return false;
                 const tag = normalizeText(rawTag);
                 const strippedTag = normalizeText(stripLeadingMarkersRaw(rawTag));
-                if (needleSet.has(tag) || (strippedTag && needleSet.has(strippedTag))) {
-                    addExample(example);
-                }
-            });
+                return target.needleSet.has(tag) || (strippedTag && target.needleSet.has(strippedTag));
+            };
 
-            // Tier 2: Word boundary & preposition target matches in original text (Tracking system)
-            list.forEach((example) => {
+            const matchBoundary = (example, target) => {
                 const original = normalizeText(example?.original || '');
-                if (!original) return;
-                if (needles.some((needle) => phraseContainsWordBoundaryNeedle(original, needle))) {
-                    addExample(example);
-                } else if (prepositionTargets.some((target) => typeof exampleMatchesRequiredPrepositionTarget === 'function' && exampleMatchesRequiredPrepositionTarget(example, target))) {
-                    addExample(example);
-                }
-            });
+                if (!original) return false;
+                if (target.needles.some((needle) => phraseContainsWordBoundaryNeedle(original, needle))) return true;
+                if (target.prepTargets.some((tgt) => typeof exampleMatchesRequiredPrepositionTarget === 'function' && exampleMatchesRequiredPrepositionTarget(example, tgt))) return true;
+                return false;
+            };
 
-            // Tier 3: Substring text match in original text (Fallback tracking)
-            list.forEach((example) => {
+            const matchSubstring = (example, target) => {
                 const original = normalizeText(example?.original || '');
-                if (!original) return;
-                if (needles.some((needle) => original.includes(needle))) {
-                    addExample(example);
-                }
-            });
+                if (!original) return false;
+                return target.needles.some((needle) => original.includes(needle));
+            };
 
-            // Tier 4: Remaining examples from the pool
+            // 1. Specific Card: Explicit AI 'for' tag match (Highest priority)
+            if (primary.needles.length > 0) {
+                list.forEach((ex) => { if (matchForTag(ex, primary)) addExample(ex); });
+            }
+
+            // 2. Specific Card: Word boundary & preposition target match (App tracking system)
+            if (primary.needles.length > 0 || primary.prepTargets.length > 0) {
+                list.forEach((ex) => { if (matchBoundary(ex, primary)) addExample(ex); });
+            }
+
+            // 3. Specific Card: Substring fallback match
+            if (primary.needles.length > 0) {
+                list.forEach((ex) => { if (matchSubstring(ex, primary)) addExample(ex); });
+            }
+
+            // 4. Fallback/Root: Explicit AI 'for' tag match
+            if (fallback.needles.length > 0) {
+                list.forEach((ex) => { if (matchForTag(ex, fallback)) addExample(ex); });
+            }
+
+            // 5. Fallback/Root: Word boundary & preposition match
+            if (fallback.needles.length > 0 || fallback.prepTargets.length > 0) {
+                list.forEach((ex) => { if (matchBoundary(ex, fallback)) addExample(ex); });
+            }
+
+            // 6. Fallback/Root: Substring match
+            if (fallback.needles.length > 0) {
+                list.forEach((ex) => { if (matchSubstring(ex, fallback)) addExample(ex); });
+            }
+
+            // 7. Remaining examples from pool
             list.forEach(addExample);
 
             return out;
@@ -24243,15 +24265,17 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
                 `;
             }
 
-            const modalTargetTerms = [
+            const specificModalTerms = [
                 searchedTermRaw,
                 displayTerm,
+                data?.searchedTerm
+            ].filter(Boolean);
+            const fallbackModalTerms = [
                 wordData?.originalTerm,
-                data?.searchedTerm,
                 data?.baseForm,
                 data?.analysisOf
             ].filter(Boolean);
-            const displayExamples = getPrioritizedExamplesForTerm(data.examples, modalTargetTerms);
+            const displayExamples = getPrioritizedExamplesForTerm(data.examples, specificModalTerms, fallbackModalTerms);
             const examplesHTML = (displayExamples && displayExamples.length > 0) ? `<h3 class="font-bold mt-4 text-content-rtl">مثال‌ها:</h3><ul class="space-y-2">${displayExamples.map(ex => `<li><strong class="text-content-ltr block">${escapeHtml(ex.original)}</strong><span class="text-gray-600 dark:text-gray-300 text-content-rtl block">${escapeHtml(ex.translation)}</span></li>`).join('')}</ul>` : '';
             const grammarNotesSectionHTML = renderGrammarNotesSection(data.grammarNotes, data);
             const prepositionSections = getRenderedGrammarPrepositionSections(data, data.grammarNotes);
@@ -29854,16 +29878,18 @@ Example:
                                 } catch (e) {}
                                 const allExamples = [...cardExamples, ...rootExamples];
 
-                                const candidateTerms = [
+                                const specificTerms = [
                                     termToSpeak,
                                     displayTermForCard,
                                     currentReviewCard?.originalTerm,
                                     currentReviewCard?.derivedFullTerm,
-                                    currentReviewCard?.speakTerm,
+                                    currentReviewCard?.speakTerm
+                                ].filter(Boolean);
+                                const fallbackTerms = [
                                     currentReviewCard?.rootTerm
                                 ].filter(Boolean);
 
-                                const prioritized = getPrioritizedExamplesForTerm(allExamples, candidateTerms);
+                                const prioritized = getPrioritizedExamplesForTerm(allExamples, specificTerms, fallbackTerms);
                                 let picked = (prioritized && prioritized.length > 0) ? prioritized[0] : null;
                                 if (!picked && allExamples.length > 0) picked = allExamples[0];
 
@@ -30748,16 +30774,18 @@ Example:
                     const items = Array.isArray(examples) ? examples : [];
                     const termToSpeak = currentReviewCard?.speakTerm || currentReviewCard?.originalTerm || '';
                     const displayTermForCard = String(currentReviewCard?.originalTerm || '').trim();
-                    const candidateTerms = [
+                    const specificTerms = [
                         termToSpeak,
                         displayTermForCard,
                         currentReviewCard?.originalTerm,
                         currentReviewCard?.derivedFullTerm,
-                        currentReviewCard?.speakTerm,
+                        currentReviewCard?.speakTerm
+                    ].filter(Boolean);
+                    const fallbackTerms = [
                         currentReviewCard?.rootTerm
                     ].filter(Boolean);
 
-                    const prioritized = getPrioritizedExamplesForTerm(items, candidateTerms);
+                    const prioritized = getPrioritizedExamplesForTerm(items, specificTerms, fallbackTerms);
                     const parsed = prioritized.map((ex) => {
                         if (typeof ex === 'string') {
                             return { original: ex.trim(), translation: '', __fromCard: false };
@@ -30803,16 +30831,18 @@ Example:
                     
                     const termToSpeak = currentReviewCard?.speakTerm || currentReviewCard?.originalTerm || '';
                     const displayTermForCard = String(currentReviewCard?.originalTerm || '').trim();
-                    const candidateTerms = [
+                    const specificTerms = [
                         termToSpeak,
                         displayTermForCard,
                         currentReviewCard?.originalTerm,
                         currentReviewCard?.derivedFullTerm,
-                        currentReviewCard?.speakTerm,
+                        currentReviewCard?.speakTerm
+                    ].filter(Boolean);
+                    const fallbackTerms = [
                         currentReviewCard?.rootTerm
                     ].filter(Boolean);
 
-                    const sortedExamples = getPrioritizedExamplesForTerm(rawExamples, candidateTerms);
+                    const sortedExamples = getPrioritizedExamplesForTerm(rawExamples, specificTerms, fallbackTerms);
 
                     const normalizeForCompare = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
                     const currentCardExampleNorm = (flashcardDisplayMode === 'example' && currentExampleSentence?.original)
