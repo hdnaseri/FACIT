@@ -1,3 +1,6 @@
+window.AITrace = window.AITrace || {
+    step: () => {}, end: () => {}
+};
 /**
  * API Utility Functions with Smart Model Fallback
  * FACIT - Gemini AI Integration
@@ -41,12 +44,15 @@ const ERROR_MESSAGES = {
 };
 
 // Model definitions (strongest to weakest and weakest to strongest)
-// Updated July 2026: gemini-2.0-flash/1.5-* shut down June 2026.
-// gemini-3.x is the current generation. gemini-2.5-* is legacy (retiring Oct 2026).
+// Updated August 2026: gemini-3.7-flash GA (Aug 13 2026), Google's newest
+// workhorse Flash model for coding/agentic tasks. gemini-2.0-flash/1.5-*
+// shut down June 2026. gemini-3.x is the current generation.
+// gemini-2.5-* is legacy (retiring Oct 2026).
 const MODELS_STRONG_TO_WEAK = [
     'gemini-3.1-pro-preview',   // Flagship reasoning / complex analysis
-    'gemini-3.6-flash',         // Newest GA flash (Jul 21 2026)
-    'gemini-3.5-flash',         // Previous GA flash
+    'gemini-3.7-flash',         // Newest GA flash (Aug 13 2026) — best flash quality
+    'gemini-3.6-flash',         // Previous GA flash (Jul 21 2026)
+    'gemini-3.5-flash',         // Older GA flash
     'gemini-2.5-pro',           // Legacy pro (retiring Oct 2026)
     'gemini-2.5-flash',         // Legacy flash (retiring Oct 2026)
     'gemini-3.5-flash-lite',    // Cheapest / high-volume automation
@@ -54,8 +60,9 @@ const MODELS_STRONG_TO_WEAK = [
 const MODELS_WEAK_TO_STRONG = [
     'gemini-3.5-flash-lite',    // Cheapest / high-volume
     'gemini-2.5-flash',         // Legacy flash
-    'gemini-3.5-flash',         // Previous GA flash
-    'gemini-3.6-flash',         // Newest GA flash
+    'gemini-3.5-flash',         // Older GA flash
+    'gemini-3.6-flash',         // Previous GA flash
+    'gemini-3.7-flash',         // Newest GA flash (Aug 13 2026) — best flash quality
     'gemini-2.5-pro',           // Legacy pro
     'gemini-3.1-pro-preview',   // Flagship reasoning
 ];

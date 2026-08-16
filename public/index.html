@@ -20593,6 +20593,108 @@ CRITICAL — HOMOGRAPH DISAMBIGUATION: The user was shown multiple unrelated lex
             }
         }
 
+        const DANISH_REFLEXIVE_PRONOUN_VARIANTS = new Set(['sig', 'mig', 'dig', 'os', 'jer']);
+        function phraseContainsWordBoundaryNeedle(normalizedHaystack, normalizedNeedle) {
+            if (!normalizedHaystack || !normalizedNeedle) return false;
+            const hTokens = normalizedHaystack.split(' ').filter(Boolean);
+            const nTokens = normalizedNeedle.split(' ').filter(Boolean);
+            if (nTokens.length === 0 || hTokens.length < nTokens.length) return false;
+            for (let start = 0; start <= hTokens.length - nTokens.length; start++) {
+                let ok = true;
+                for (let i = 0; i < nTokens.length; i++) {
+                    const hTok = hTokens[start + i];
+                    const nTok = nTokens[i];
+                    if (hTok === nTok) continue;
+                    if (nTok === 'sig' && DANISH_REFLEXIVE_PRONOUN_VARIANTS.has(hTok)) continue;
+                    if (hTok.length > nTok.length && hTok.startsWith(nTok) && (hTok.length - nTok.length) <= 2) continue;
+                    ok = false;
+                    break;
+                }
+                if (ok) return true;
+            }
+            return false;
+        }
+
+        function getPrioritizedExamplesForTerm(examples, ...terms) {
+            const list = normalizeWordExamplesForDisplay(Array.isArray(examples) ? examples : (examples ? [examples] : []));
+            if (list.length === 0) return [];
+
+            const rawTerms = [];
+            const prepositionTargets = [];
+            for (const term of terms) {
+                if (Array.isArray(term)) {
+                    term.forEach((item) => {
+                        if (item && typeof item === 'object' && !Array.isArray(item) && (item.anchorText || item.preposition)) {
+                            prepositionTargets.push(item);
+                        } else if (item) {
+                            rawTerms.push(item);
+                        }
+                    });
+                } else if (term && typeof term === 'object' && (term.anchorText || term.preposition)) {
+                    prepositionTargets.push(term);
+                } else if (term) {
+                    rawTerms.push(term);
+                }
+            }
+
+            const needles = collectWordTermCandidates(rawTerms)
+                .map(v => normalizeText(v))
+                .filter(Boolean);
+
+            if (needles.length === 0 && prepositionTargets.length === 0) return list;
+
+            const needleSet = new Set(needles);
+            const seenKeys = new Set();
+            const out = [];
+
+            const addExample = (ex) => {
+                if (!ex) return;
+                const orig = String(ex?.original || '').trim();
+                const trans = String(ex?.translation || '').trim();
+                const key = `${orig.toLowerCase()}__${trans.toLowerCase()}`;
+                if (!orig && !trans) return;
+                if (seenKeys.has(key)) return;
+                seenKeys.add(key);
+                out.push(ex);
+            };
+
+            // Tier 1: Explicit AI 'for' tag match (highest priority)
+            list.forEach((example) => {
+                const rawTag = String(example?.for || '').trim();
+                if (!rawTag) return;
+                const tag = normalizeText(rawTag);
+                const strippedTag = normalizeText(stripLeadingMarkersRaw(rawTag));
+                if (needleSet.has(tag) || (strippedTag && needleSet.has(strippedTag))) {
+                    addExample(example);
+                }
+            });
+
+            // Tier 2: Word boundary & preposition target matches in original text (Tracking system)
+            list.forEach((example) => {
+                const original = normalizeText(example?.original || '');
+                if (!original) return;
+                if (needles.some((needle) => phraseContainsWordBoundaryNeedle(original, needle))) {
+                    addExample(example);
+                } else if (prepositionTargets.some((target) => typeof exampleMatchesRequiredPrepositionTarget === 'function' && exampleMatchesRequiredPrepositionTarget(example, target))) {
+                    addExample(example);
+                }
+            });
+
+            // Tier 3: Substring text match in original text (Fallback tracking)
+            list.forEach((example) => {
+                const original = normalizeText(example?.original || '');
+                if (!original) return;
+                if (needles.some((needle) => original.includes(needle))) {
+                    addExample(example);
+                }
+            });
+
+            // Tier 4: Remaining examples from the pool
+            list.forEach(addExample);
+
+            return out;
+        }
+
         function extractGapQuotedTerm(gapText) {
             const m = String(gapText || '').match(/"([^"]+)"/);
             return m ? m[1].trim() : '';
@@ -24141,7 +24243,15 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
                 `;
             }
 
-            const displayExamples = normalizeWordExamplesForDisplay(data.examples);
+            const modalTargetTerms = [
+                searchedTermRaw,
+                displayTerm,
+                wordData?.originalTerm,
+                data?.searchedTerm,
+                data?.baseForm,
+                data?.analysisOf
+            ].filter(Boolean);
+            const displayExamples = getPrioritizedExamplesForTerm(data.examples, modalTargetTerms);
             const examplesHTML = (displayExamples && displayExamples.length > 0) ? `<h3 class="font-bold mt-4 text-content-rtl">مثال‌ها:</h3><ul class="space-y-2">${displayExamples.map(ex => `<li><strong class="text-content-ltr block">${escapeHtml(ex.original)}</strong><span class="text-gray-600 dark:text-gray-300 text-content-rtl block">${escapeHtml(ex.translation)}</span></li>`).join('')}</ul>` : '';
             const grammarNotesSectionHTML = renderGrammarNotesSection(data.grammarNotes, data);
             const prepositionSections = getRenderedGrammarPrepositionSections(data, data.grammarNotes);
@@ -26937,27 +27047,6 @@ Example:
         // skal vi forholde os til denne situation?"). Without this equivalence, a
         // perfectly valid, correctly-tagged-or-untagged example would silently fail
         // to match its own flashcard's "sig"-based needle.
-        const DANISH_REFLEXIVE_PRONOUN_VARIANTS = new Set(['sig', 'mig', 'dig', 'os', 'jer']);
-        function phraseContainsWordBoundaryNeedle(normalizedHaystack, normalizedNeedle) {
-            if (!normalizedHaystack || !normalizedNeedle) return false;
-            const hTokens = normalizedHaystack.split(' ').filter(Boolean);
-            const nTokens = normalizedNeedle.split(' ').filter(Boolean);
-            if (nTokens.length === 0 || hTokens.length < nTokens.length) return false;
-            for (let start = 0; start <= hTokens.length - nTokens.length; start++) {
-                let ok = true;
-                for (let i = 0; i < nTokens.length; i++) {
-                    const hTok = hTokens[start + i];
-                    const nTok = nTokens[i];
-                    if (hTok === nTok) continue;
-                    if (nTok === 'sig' && DANISH_REFLEXIVE_PRONOUN_VARIANTS.has(hTok)) continue;
-                    if (hTok.length > nTok.length && hTok.startsWith(nTok) && (hTok.length - nTok.length) <= 2) continue;
-                    ok = false;
-                    break;
-                }
-                if (ok) return true;
-            }
-            return false;
-        }
 		function collectExamplesForDerivedTerm(examples, ...terms) {
 			const list = Array.isArray(examples) ? examples : [];
             const rawTerms = [];
@@ -26967,13 +27056,13 @@ Example:
                     term.forEach((item) => {
                         if (item && typeof item === 'object' && !Array.isArray(item) && (item.anchorText || item.preposition)) {
                             prepositionTargets.push(item);
-                        } else {
+                        } else if (item) {
                             rawTerms.push(item);
                         }
                     });
                 } else if (term && typeof term === 'object' && (term.anchorText || term.preposition)) {
                     prepositionTargets.push(term);
-                } else {
+                } else if (term) {
                     rawTerms.push(term);
                 }
             }
@@ -26982,12 +27071,6 @@ Example:
 				.filter(Boolean);
 			if (needles.length === 0 && prepositionTargets.length === 0) return [];
 
-            // PRIMARY: trust the AI's own explicit 'for' tag, which states exactly which
-            // flashcard an example belongs to instead of the app having to guess via text
-            // search. This is what fixes cases like a "betinge" flashcard accidentally
-            // grabbing an example that's actually about "betingelse", or a reflexive
-            // flashcard like "at betinge sig" failing to find its own example because the
-            // sentence uses an inflected form like "betingede sig".
             const needleSet = new Set(needles);
             const taggedMatches = list.filter((example) => {
                 const rawTag = String(example?.for || '').trim();
@@ -26999,13 +27082,21 @@ Example:
             });
             if (taggedMatches.length > 0) return taggedMatches;
 
-            // FALLBACK for older examples generated before the 'for' tag existed.
-			return list.filter((example) => {
+            // FALLBACK for older examples generated before the 'for' tag existed (word boundary & prepositions)
+			const boundaryMatches = list.filter((example) => {
 				const original = normalizeText(example?.original || '');
 				if (!original) return false;
 				if (needles.some((needle) => phraseContainsWordBoundaryNeedle(original, needle))) return true;
-                return prepositionTargets.some((target) => exampleMatchesRequiredPrepositionTarget(example, target));
+                return prepositionTargets.some((target) => typeof exampleMatchesRequiredPrepositionTarget === 'function' && exampleMatchesRequiredPrepositionTarget(example, target));
 			});
+            if (boundaryMatches.length > 0) return boundaryMatches;
+
+            // Substring fallback
+            return list.filter((example) => {
+                const original = normalizeText(example?.original || '');
+                if (!original) return false;
+                return needles.some((needle) => original.includes(needle));
+            });
 		}
         function normalizeDisplayedFormKeyForFlashcards(value) {
             try {
@@ -29752,34 +29843,29 @@ Example:
                                     cardBack.innerHTML = '<p class="text-center">اطلاعاتی یافت نشد.</p>';
                                 }
                             } else if (flashcardDisplayMode === 'example') {
-                                const examples = (data && Array.isArray(data.examples)) ? data.examples : [];
-                                // اولویت اول: جمله مثال اختصاصی‌ای که هوش مصنوعی دقیقاً برای همین
-                                // کارت/فرم (با تگ 'for') تولید کرده — نه هر جمله‌ای که صرفاً از نظر
-                                // متنی حاوی کلمه است. collectExamplesForDerivedTerm خودش این اولویت
-                                // را رعایت می‌کند: ابتدا تطبیق دقیق روی تگ 'for'، و فقط در نبود چنین
-                                // موردی، جستجوی متنی/مرزی به‌عنوان راه‌حل جایگزین.
+                                const cardExamples = (data && Array.isArray(data.examples)) ? data.examples : [];
+                                let rootExamples = [];
+                                try {
+                                    const linkedId = String(currentReviewCard?.linkedWordId || currentReviewCard?.id || '').trim();
+                                    if (linkedId) {
+                                        const rootWord = (localWordsCache || []).find(w => w && String(w.id || '').trim() === linkedId);
+                                        if (rootWord?.aiData?.examples) rootExamples = rootWord.aiData.examples;
+                                    }
+                                } catch (e) {}
+                                const allExamples = [...cardExamples, ...rootExamples];
+
                                 const candidateTerms = [
                                     termToSpeak,
                                     displayTermForCard,
                                     currentReviewCard?.originalTerm,
-                                    currentReviewCard?.derivedFullTerm
+                                    currentReviewCard?.derivedFullTerm,
+                                    currentReviewCard?.speakTerm,
+                                    currentReviewCard?.rootTerm
                                 ].filter(Boolean);
-                                let picked = null;
-                                try {
-                                    const prioritized = collectExamplesForDerivedTerm(examples, candidateTerms);
-                                    if (prioritized.length > 0) picked = prioritized[0];
-                                } catch (e) {}
-                                // راه‌حل جایگزین: جمله‌ای که صرفاً توسط جستجوی متنی سیستم کشف می‌شود
-                                // (فقط وقتی مثال اختصاصی در دسترس نبود).
-                                if (!picked) {
-                                    try {
-                                        const key = stripLeadingMarkersRaw(termToSpeak).trim();
-                                        if (key) {
-                                            picked = examples.find(ex => (ex?.original || '').toLowerCase().includes(key.toLowerCase())) || null;
-                                        }
-                                    } catch (e) {}
-                                }
-                                if (!picked && examples.length > 0) picked = examples[0];
+
+                                const prioritized = getPrioritizedExamplesForTerm(allExamples, candidateTerms);
+                                let picked = (prioritized && prioritized.length > 0) ? prioritized[0] : null;
+                                if (!picked && allExamples.length > 0) picked = allExamples[0];
 
                                 const rawOriginal = String(picked?.original || '').trim();
                                 const rawTranslation = String(picked?.translation || '').trim();
@@ -30660,7 +30746,19 @@ Example:
 
                 const renderExamplesList = (examples) => {
                     const items = Array.isArray(examples) ? examples : [];
-                    const parsed = items.map((ex) => {
+                    const termToSpeak = currentReviewCard?.speakTerm || currentReviewCard?.originalTerm || '';
+                    const displayTermForCard = String(currentReviewCard?.originalTerm || '').trim();
+                    const candidateTerms = [
+                        termToSpeak,
+                        displayTermForCard,
+                        currentReviewCard?.originalTerm,
+                        currentReviewCard?.derivedFullTerm,
+                        currentReviewCard?.speakTerm,
+                        currentReviewCard?.rootTerm
+                    ].filter(Boolean);
+
+                    const prioritized = getPrioritizedExamplesForTerm(items, candidateTerms);
+                    const parsed = prioritized.map((ex) => {
                         if (typeof ex === 'string') {
                             return { original: ex.trim(), translation: '', __fromCard: false };
                         }
@@ -30701,7 +30799,7 @@ Example:
                 };
 
                 if (exampleBtn) {
-                    const rawExamples = Array.isArray(cardData?.examples) ? cardData.examples : [];
+                    const rawExamples = Array.isArray(hintData?.examples) ? hintData.examples : (Array.isArray(cardData?.examples) ? cardData.examples : []);
                     
                     const termToSpeak = currentReviewCard?.speakTerm || currentReviewCard?.originalTerm || '';
                     const displayTermForCard = String(currentReviewCard?.originalTerm || '').trim();
@@ -30709,37 +30807,12 @@ Example:
                         termToSpeak,
                         displayTermForCard,
                         currentReviewCard?.originalTerm,
-                        currentReviewCard?.derivedFullTerm
+                        currentReviewCard?.derivedFullTerm,
+                        currentReviewCard?.speakTerm,
+                        currentReviewCard?.rootTerm
                     ].filter(Boolean);
 
-                    let prioritizedExamples = [];
-                    try {
-                        prioritizedExamples = collectExamplesForDerivedTerm(rawExamples, candidateTerms);
-                    } catch (e) {}
-
-                    if (prioritizedExamples.length === 0) {
-                        try {
-                            const key = stripLeadingMarkersRaw(termToSpeak).trim();
-                            if (key) {
-                                const matched = rawExamples.filter(ex => {
-                                    const orig = (ex && typeof ex === 'object') ? (ex.original || '') : String(ex || '');
-                                    return orig.toLowerCase().includes(key.toLowerCase());
-                                });
-                                prioritizedExamples.push(...matched);
-                            }
-                        } catch (e) {}
-                    }
-
-                    const sortedExamples = [];
-                    const seenOrigs = new Set();
-                    const addEx = (ex) => {
-                        const orig = ((ex && typeof ex === 'object') ? (ex.original || '') : String(ex || '')).trim();
-                        if (!orig || seenOrigs.has(orig)) return;
-                        seenOrigs.add(orig);
-                        sortedExamples.push(ex);
-                    };
-                    prioritizedExamples.forEach(addEx);
-                    rawExamples.forEach(addEx);
+                    const sortedExamples = getPrioritizedExamplesForTerm(rawExamples, candidateTerms);
 
                     const normalizeForCompare = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
                     const currentCardExampleNorm = (flashcardDisplayMode === 'example' && currentExampleSentence?.original)
