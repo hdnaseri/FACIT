@@ -7998,6 +7998,7 @@ Respond in a single, valid JSON object:
   "isCorrect": true | false,
   "suggestions": ["suggestion1", "suggestion2"],
   "intent": "word" | "phrase" | "question",
+  "rootWord": "the base/lemma form of the word (e.g. 'at spise' for 'spiste', 'en bil' for 'bilerne'). Empty if intent is question or phrase.",
   "homographs": [{"word": "...", "partOfSpeech": "...", "meaning": "..."}]
 }`;
         const similarSpellingPromptTemplate = `You are a linguistic assistant. For the {language} word "{term}", provide up to 5 other real {language} words that have SIMILAR SPELLING but DIFFERENT meanings.
@@ -16831,6 +16832,14 @@ Rules:
                     if (analysisData.isCorrect !== false && homographs.length >= 2) {
                         displayHomographChoice(term, homographs);
                         return;
+                    }
+
+                    if (analysisData.rootWord && typeof analysisData.rootWord === 'string' && analysisData.intent === 'word') {
+                        const originalLower = term.trim().toLowerCase();
+                        const rootLower = analysisData.rootWord.trim().toLowerCase();
+                        if (rootLower && rootLower !== originalLower) {
+                            term = analysisData.rootWord.trim();
+                        }
                     }
                 }
 
