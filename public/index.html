@@ -5501,22 +5501,27 @@ let __lastKnownWordUpdateDerivedResult = null;
         // term (a) skips the preflight UI, and (b) tells the AI to analyze ONLY that one sense.
         // After the hint is consumed (used in an AI prompt), it is cleared so that the NEXT
         // Enter-press for the same word re-runs the preflight and shows the disambiguation UI again.
-        let homographResolution = { term: null, hint: null };
-        function setHomographResolution(term, hint) {
-            homographResolution = { term: (term || '').trim().toLowerCase(), hint: hint || null };
+        let homographResolution = { term: null, hint: null, homographs: null };
+        function setHomographResolution(term, hint, homographsList = null) {
+            homographResolution = { term: (term || '').trim().toLowerCase(), hint: hint || null, homographs: homographsList || null };
         }
         function clearHomographResolution() {
-            homographResolution = { term: null, hint: null };
+            homographResolution = { term: null, hint: null, homographs: null };
         }
+        // Returns the hint string (backward compatible)
         function consumeHomographHint(term) {
+            const data = consumeHomographData(term);
+            return data ? data.hint : '';
+        }
+        // Returns { hint, homographs } and clears the resolution
+        function consumeHomographData(term) {
             const t = (term || '').trim().toLowerCase();
             if (homographResolution.term && homographResolution.hint && t === homographResolution.term) {
-                const hint = homographResolution.hint;
-                // Clear immediately after consuming so the NEXT search re-runs preflight.
+                const data = { hint: homographResolution.hint, homographs: homographResolution.homographs };
                 clearHomographResolution();
-                return hint;
+                return data;
             }
-            return '';
+            return null;
         }
         let currentQuizQuestions = [], currentQuestionIndex = 0, quizScore = 0;
 
@@ -16855,7 +16860,9 @@ Rules:
                         const promptSearchTerm = stripForceSearchPunctuation(searchTerm);
                         const promptTemplate = masterPromptTemplate;
 
-                        const mainPrompt = promptTemplate.replace(/{term}/g, promptSearchTerm).replace(/{language}/g, learningLanguage).replace('{user_instructions}', consumeHomographHint(term));
+                        const homographData = consumeHomographData(term);
+                        const hintInstruction = homographData ? homographData.hint : '';
+                        const mainPrompt = promptTemplate.replace(/{term}/g, promptSearchTerm).replace(/{language}/g, learningLanguage).replace('{user_instructions}', hintInstruction);
                         const combinedPrompt = `${mainPrompt}
 
 IMPORTANT: Also add a field "similarWords" to the SAME JSON response.
@@ -16873,6 +16880,9 @@ Example:
 
                         if (!directData || !directData.translation || !directData.partOfSpeech) {
                             throw new Error('پاسخ هوش مصنوعی کامل نیست. لطفاً دوباره تلاش کنید.');
+                        }
+                        if (homographData && Array.isArray(homographData.homographs)) {
+                            directData.homographs = homographData.homographs;
                         }
                         const missingDirectExampleTerms = findMissingRequiredExampleTerms(directData, searchTerm);
                         // BUGFIX: this gate used to only look at missing EXAMPLE coverage
@@ -17137,7 +17147,9 @@ Example:
                         ? options.customRetryConfig
                         : {};
                     const promptTemplate = masterPromptTemplate;
-                    const mainPrompt = promptTemplate.replace(/{term}/g, promptSearchTerm).replace(/{language}/g, learningLanguage).replace('{user_instructions}', consumeHomographHint(term));
+                    const homographData = consumeHomographData(term);
+                    const hintInstruction = homographData ? homographData.hint : '';
+                    const mainPrompt = promptTemplate.replace(/{term}/g, promptSearchTerm).replace(/{language}/g, learningLanguage).replace('{user_instructions}', hintInstruction);
                     const combinedPrompt = `${mainPrompt}
 
 IMPORTANT: Also add a field "similarWords" to the SAME JSON response.
@@ -17161,6 +17173,9 @@ Example:
                     if (!analysisData || !analysisData.translation || !analysisData.partOfSpeech) {
                         console.error('❌ داده نامعتبر از AI:', analysisData);
                         throw new Error('پاسخ هوش مصنوعی کامل نیست. لطفاً دوباره تلاش کنید.');
+                    }
+                    if (homographData && Array.isArray(homographData.homographs)) {
+                        analysisData.homographs = homographData.homographs;
                     }
                     const missingAnalysisExampleTerms = findMissingRequiredExampleTerms(analysisData, searchTerm);
                     // BUGFIX: see matching comment in the direct-analysis path above — this
@@ -18193,7 +18208,7 @@ CRITICAL — HOMOGRAPH DISAMBIGUATION: The user was shown multiple unrelated lex
                         // consumeHomographHint() inside startWordAnalysis will use the hint
                         // to set bypassAiPreflight=true (no second preflight needed) AND
                         // inject the disambiguation instruction into the AI prompt.
-                        setHomographResolution(searchWord, buildHomographHint(chosen, others));
+                        setHomographResolution(searchWord, buildHomographHint(chosen, others), pendingHomographs);
                         searchInput.value = searchWord;
                         syncSearchInputLayout();
                         analyzeTerm(searchWord, true);  // forceRefresh=true: bypass all caches
@@ -18250,6 +18265,27 @@ CRITICAL — HOMOGRAPH DISAMBIGUATION: The user was shown multiple unrelated lex
                     searchInput.value = wordToSearch;
                     analyzeTerm(wordToSearch);
                 }
+                return;
+            }
+            
+            const homographBadgeBtn = e.target.closest('.homograph-badge-btn');
+            if (homographBadgeBtn) {
+                try {
+                    const homographsStr = homographBadgeBtn.getAttribute('data-homographs');
+                    const term = homographBadgeBtn.getAttribute('data-term');
+                    if (homographsStr && term) {
+                        const homographs = JSON.parse(homographsStr);
+                        if (Array.isArray(homographs) && homographs.length >= 2) {
+                            displayHomographChoice(term, homographs, (selectedTerm, chosen, others) => {
+                                setHomographResolution(selectedTerm, buildHomographHint(chosen, others), homographs);
+                                resetSearchView();
+                                searchInput.value = selectedTerm;
+                                syncSearchInputLayout();
+                                analyzeTerm(selectedTerm, true);
+                            });
+                        }
+                    }
+                } catch (err) {}
                 return;
             }
 
@@ -22989,6 +23025,7 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
             const cefrLevel = data.cefrLevel || '';
             const cefrClass = levelColors[cefrLevel] || levelColors['N/A'];
             const cefrBadge = cefrLevel ? `<span class="flex items-center justify-center w-9 h-9 text-xs font-bold ${cefrClass} rounded-full tracking-wider border shadow-sm flex-shrink-0">${escapeHtml(cefrLevel)}</span>` : '';
+            const homographBadge = (Array.isArray(data.homographs) && data.homographs.length > 1) ? `<button class="homograph-badge-btn flex items-center justify-center w-9 h-9 text-gray-500 hover:text-blue-600 hover:bg-blue-50 dark:text-gray-400 dark:hover:text-blue-400 dark:hover:bg-blue-900/20 border border-gray-200/80 dark:border-gray-700/80 rounded-full transition-all flex-shrink-0 shadow-sm" title="این کلمه چند ریشه متفاوت دارد (Homograph)" data-homographs='${escapeHtml(JSON.stringify(data.homographs))}' data-term="${escapeHtml(originalTerm)}"><i class="fa-solid fa-layer-group text-[1.1rem]"></i></button>` : '';
 
             const relatedLexicalBtn = `<button type="button" class="open-related-lexical-btn w-9 h-9 flex items-center justify-center rounded-full text-gray-500 hover:text-blue-600 hover:bg-blue-50 dark:text-gray-400 dark:hover:text-blue-400 dark:hover:bg-blue-900/20 border border-gray-200/80 dark:border-gray-700/80 transition-all flex-shrink-0 shadow-sm" data-word-id="${escapeHtml(wordData.id || '')}" data-display-term="${escapeHtml(displayTerm || '')}" title="کلمات مرتبط">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
@@ -24636,6 +24673,7 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
 								})()}</h2>
                     <div class="word-details-actions">
                         ${cefrBadge}
+                        ${homographBadge}
                         ${relatedLexicalBtn}
                         <button id="speak-btn-dynamic" class="w-9 h-9 flex items-center justify-center rounded-full text-gray-500 hover:text-blue-600 hover:bg-blue-50 dark:text-gray-400 dark:hover:text-blue-400 dark:hover:bg-blue-900/20 border border-gray-200/80 dark:border-gray-700/80 transition-all flex-shrink-0 shadow-sm" title="تلفظ"><i class="fa-solid fa-volume-high text-[1.1rem]"></i></button>
                     </div>
@@ -33982,6 +34020,39 @@ Example:
 				if (t) openOrCreateWordFromTerm(t);
 				return;
 			}
+			const homographBadgeBtn = e.target.closest('.homograph-badge-btn');
+			if (homographBadgeBtn) {
+				try {
+					const homographsStr = homographBadgeBtn.getAttribute('data-homographs');
+					const term = homographBadgeBtn.getAttribute('data-term');
+					if (homographsStr && term) {
+						const homographs = JSON.parse(homographsStr);
+						if (Array.isArray(homographs) && homographs.length >= 2) {
+							displayHomographChoice(term, homographs, (selectedTerm, chosen, others) => {
+								setHomographResolution(selectedTerm, buildHomographHint(chosen, others), homographs);
+								// If they clicked it from inside the modal, they might want to switch root.
+								// We can just trigger a new search for that root.
+								const wasInSearchTab = document.getElementById('search-tab')?.classList.contains('active');
+								modal.classList.add('hidden');
+								if (wasInSearchTab) {
+									resetSearchView();
+									searchInput.value = selectedTerm;
+									syncSearchInputLayout();
+									analyzeTerm(selectedTerm, true);
+								} else {
+                                    // Make sure modal is closed, and open temp search
+                                    closeStandaloneWordModal();
+                                    switchTab('search-tab');
+                                    searchInput.value = selectedTerm;
+                                    syncSearchInputLayout();
+                                    analyzeTerm(selectedTerm, true);
+                                }
+							});
+						}
+					}
+				} catch (err) {}
+				return;
+			}
 
             const clickableTerm = e.target.closest('.clickable-term, .clickable-word-family');
             if (clickableTerm) {
@@ -35563,7 +35634,7 @@ Every field must be filled with real linguistic data (never a placeholder, never
                         const modalEl = document.getElementById('word-modal');
                         if (modalEl) modalEl.classList.add('hidden');
                         displayHomographChoice(word.originalTerm || word.aiData?.userSearchTerm || '', homographs, async (selectedTerm, chosen, others) => {
-                            setHomographResolution(selectedTerm, buildHomographHint(chosen, others));
+                            setHomographResolution(selectedTerm, buildHomographHint(chosen, others), homographs);
                             const aiResultEl = document.getElementById('ai-result');
                             if (aiResultEl) aiResultEl.classList.add('hidden');
                             document.getElementById('refresh-loading-overlay')?.remove();
@@ -35810,7 +35881,7 @@ Every field must be filled with real linguistic data (never a placeholder, never
                         const modalEl = document.getElementById('word-modal');
                         if (modalEl) modalEl.classList.add('hidden');
                         displayHomographChoice(word.originalTerm || word.aiData?.userSearchTerm || '', homographs, async (selectedTerm, chosen, others) => {
-                            setHomographResolution(selectedTerm, buildHomographHint(chosen, others));
+                            setHomographResolution(selectedTerm, buildHomographHint(chosen, others), homographs);
                             const aiResultEl = document.getElementById('ai-result');
                             if (aiResultEl) aiResultEl.classList.add('hidden');
                             document.getElementById('refresh-loading-overlay')?.remove();
