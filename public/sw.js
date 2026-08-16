@@ -1,5 +1,5 @@
 
-const CACHE_NAME = 'facit-cache-v14.2.0';
+const CACHE_NAME = 'facit-cache-v14.2.1';
 const DEBUG = false;
 const URLS_TO_CACHE = [
   '/',
