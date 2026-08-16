@@ -30843,25 +30843,16 @@ Example:
                     ].filter(Boolean);
 
                     const sortedExamples = getPrioritizedExamplesForTerm(rawExamples, specificTerms, fallbackTerms);
+                    // فقط اولین و بهترین جمله مثال نمایش داده می‌شود:
+                    // ۱. جمله اختصاصی که هوش مصنوعی با تگ 'for' برای این کارت تولید کرده
+                    // ۲. در صورت نبود، جمله‌ای که سیستم ردیابی اپ برای این کلمه پیدا می‌کند
+                    const bestExample = sortedExamples.length > 0 ? sortedExamples[0] : null;
 
-                    const normalizeForCompare = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
-                    const currentCardExampleNorm = (flashcardDisplayMode === 'example' && currentExampleSentence?.original)
-                        ? normalizeForCompare(currentExampleSentence.original)
-                        : '';
-                    const examples = currentCardExampleNorm
-                        ? sortedExamples.filter((ex) => {
-                            const original = (ex && typeof ex === 'object') ? (ex.original || '') : String(ex || '');
-                            return normalizeForCompare(original) !== currentCardExampleNorm;
-                        })
-                        : sortedExamples;
-
-                    if (!examples || examples.length === 0) {
+                    if (!bestExample) {
                         delete hintDisplay.dataset.speakText;
                         hintDisplay.innerHTML = `<div class="text-content-rtl">مثالی برای این کلمه وجود ندارد.</div>`;
                     } else {
-                        currentExampleIndex = (currentExampleIndex + 1) % examples.length;
-                        const example = examples[currentExampleIndex];
-                        const original = (example && typeof example === 'object') ? (example.original || '') : String(example || '');
+                        const original = String(bestExample?.original || '').trim();
                         hintDisplay.dataset.speakText = original;
                         hintDisplay.innerHTML = `<div class="text-content-ltr cursor-pointer select-none" data-example-speech="1" data-speak-text="${escapeHtml(original)}" title="برای پخش صوت جمله کلیک کنید" style="transition:none !important; animation:none !important; transform:none !important; touch-action:manipulation; -webkit-tap-highlight-color:transparent; user-select:none; -webkit-user-select:none;"><strong style="transition:none !important; animation:none !important; transform:none !important;">${escapeHtml(original)}</strong></div>`;
                     }
