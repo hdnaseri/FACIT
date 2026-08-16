@@ -30702,16 +30702,55 @@ Example:
 
                 if (exampleBtn) {
                     const rawExamples = Array.isArray(cardData?.examples) ? cardData.examples : [];
+                    
+                    const termToSpeak = currentReviewCard?.speakTerm || currentReviewCard?.originalTerm || '';
+                    const displayTermForCard = String(currentReviewCard?.originalTerm || '').trim();
+                    const candidateTerms = [
+                        termToSpeak,
+                        displayTermForCard,
+                        currentReviewCard?.originalTerm,
+                        currentReviewCard?.derivedFullTerm
+                    ].filter(Boolean);
+
+                    let prioritizedExamples = [];
+                    try {
+                        prioritizedExamples = collectExamplesForDerivedTerm(rawExamples, candidateTerms);
+                    } catch (e) {}
+
+                    if (prioritizedExamples.length === 0) {
+                        try {
+                            const key = stripLeadingMarkersRaw(termToSpeak).trim();
+                            if (key) {
+                                const matched = rawExamples.filter(ex => {
+                                    const orig = (ex && typeof ex === 'object') ? (ex.original || '') : String(ex || '');
+                                    return orig.toLowerCase().includes(key.toLowerCase());
+                                });
+                                prioritizedExamples.push(...matched);
+                            }
+                        } catch (e) {}
+                    }
+
+                    const sortedExamples = [];
+                    const seenOrigs = new Set();
+                    const addEx = (ex) => {
+                        const orig = ((ex && typeof ex === 'object') ? (ex.original || '') : String(ex || '')).trim();
+                        if (!orig || seenOrigs.has(orig)) return;
+                        seenOrigs.add(orig);
+                        sortedExamples.push(ex);
+                    };
+                    prioritizedExamples.forEach(addEx);
+                    rawExamples.forEach(addEx);
+
                     const normalizeForCompare = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
                     const currentCardExampleNorm = (flashcardDisplayMode === 'example' && currentExampleSentence?.original)
                         ? normalizeForCompare(currentExampleSentence.original)
                         : '';
                     const examples = currentCardExampleNorm
-                        ? rawExamples.filter((ex) => {
+                        ? sortedExamples.filter((ex) => {
                             const original = (ex && typeof ex === 'object') ? (ex.original || '') : String(ex || '');
                             return normalizeForCompare(original) !== currentCardExampleNorm;
                         })
-                        : rawExamples;
+                        : sortedExamples;
 
                     if (!examples || examples.length === 0) {
                         delete hintDisplay.dataset.speakText;
