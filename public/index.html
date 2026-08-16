@@ -5497,16 +5497,24 @@ let __lastKnownWordUpdateDerivedResult = null;
         // choice card).
         let isSearchSubmitted = false;
         // Remembers a homograph the user explicitly disambiguated (e.g. picked "led (joint)"
-        // vs "led (past tense of at lide)") so the next analysis call for that exact term
-        // (a) skips asking again, and (b) tells the AI to analyze ONLY that one sense.
+        // vs "led (past tense of at lide)") so the IMMEDIATE next analysis call for that exact
+        // term (a) skips the preflight UI, and (b) tells the AI to analyze ONLY that one sense.
+        // After the hint is consumed (used in an AI prompt), it is cleared so that the NEXT
+        // Enter-press for the same word re-runs the preflight and shows the disambiguation UI again.
         let homographResolution = { term: null, hint: null };
         function setHomographResolution(term, hint) {
             homographResolution = { term: (term || '').trim().toLowerCase(), hint: hint || null };
         }
+        function clearHomographResolution() {
+            homographResolution = { term: null, hint: null };
+        }
         function consumeHomographHint(term) {
             const t = (term || '').trim().toLowerCase();
             if (homographResolution.term && homographResolution.hint && t === homographResolution.term) {
-                return homographResolution.hint;
+                const hint = homographResolution.hint;
+                // Clear immediately after consuming so the NEXT search re-runs preflight.
+                clearHomographResolution();
+                return hint;
             }
             return '';
         }
@@ -7998,7 +8006,6 @@ Respond in a single, valid JSON object:
   "isCorrect": true | false,
   "suggestions": ["suggestion1", "suggestion2"],
   "intent": "word" | "phrase" | "question",
-  "rootWord": "the base/lemma form of the word (e.g. 'at spise' for 'spiste', 'en bil' for 'bilerne'). Empty if intent is question or phrase.",
   "homographs": [{"word": "...", "partOfSpeech": "...", "meaning": "..."}]
 }`;
         const similarSpellingPromptTemplate = `You are a linguistic assistant. For the {language} word "{term}", provide up to 5 other real {language} words that have SIMILAR SPELLING but DIFFERENT meanings.
@@ -16833,14 +16840,6 @@ Rules:
                         displayHomographChoice(term, homographs);
                         return;
                     }
-
-                    if (analysisData.rootWord && typeof analysisData.rootWord === 'string' && analysisData.intent === 'word') {
-                        const originalLower = term.trim().toLowerCase();
-                        const rootLower = analysisData.rootWord.trim().toLowerCase();
-                        if (rootLower && rootLower !== originalLower) {
-                            term = analysisData.rootWord.trim();
-                        }
-                    }
                 }
 
                 if (isSimpleQuery) {
@@ -17987,22 +17986,42 @@ Output:
         let pendingHomographs = [];
         let pendingHomographOriginalTerm = '';
         let pendingHomographCallback = null;
+        // Translates English part-of-speech labels to Persian for display in the homograph UI.
+        function homographPosToFarsi(pos) {
+            if (!pos) return '';
+            const map = {
+                'noun': 'اسم', 'verb': 'فعل', 'adjective': 'صفت', 'adverb': 'قید',
+                'pronoun': 'ضمیر', 'preposition': 'حرف اضافه', 'conjunction': 'حرف ربط',
+                'interjection': 'عبارت تعجبی', 'phrasal verb': 'عبارت فعلی',
+                'other': 'سایر'
+            };
+            return map[pos.toLowerCase().trim()] || pos;
+        }
         function displayHomographChoice(term, homographs, onSelectCallback) {
             pendingHomographCallback = onSelectCallback || null;
             loader.classList.add('hidden');
             pendingHomographs = homographs;
             pendingHomographOriginalTerm = term;
             aiResult.innerHTML = `
-                <h3 class="font-bold text-center mb-4">«${escapeHtml(term)}» بیش از یک ریشه/معنی متفاوت دارد</h3>
-                <div class="flex flex-col gap-2">
-                    ${homographs.map((h, index) => `
-                        <button type="button" class="homograph-choice-btn w-full flex items-center justify-between gap-3 bg-blue-500 text-white p-3 rounded-lg hover:bg-blue-600 transition" data-index="${index}" dir="ltr">
-                            <span dir="ltr" class="font-bold whitespace-nowrap">${escapeHtml(h.word || term)}${h.partOfSpeech ? ` <span class="font-normal opacity-80">(${escapeHtml(h.partOfSpeech)})</span>` : ''}</span>
-                            ${h.meaning ? `<span dir="rtl" class="font-normal text-sm opacity-90 text-right">${escapeHtml(h.meaning)}</span>` : ''}
-                        </button>
-                    `).join('')}
+                <div class="text-center mb-5">
+                    <div class="text-2xl mb-2" dir="ltr">${escapeHtml(term)}</div>
+                    <div class="text-content-rtl text-sm text-gray-600 dark:text-gray-300">این کلمه چند ریشه/معنی کاملاً متفاوت دارد. ریشه مورد نظر خود را انتخاب کنید:</div>
                 </div>
-                <button id="new-search-btn" class="w-full mt-3 bg-gray-500 text-white p-3 rounded-lg font-bold hover:bg-gray-600 transition">لغو و جستجوی جدید</button>
+                <div class="flex flex-col gap-3">
+                    ${homographs.map((h, index) => {
+                        const posLabel = homographPosToFarsi(h.partOfSpeech);
+                        return `
+                        <button type="button" class="homograph-choice-btn w-full flex items-start gap-3 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-700 text-gray-900 dark:text-gray-100 p-4 rounded-xl hover:bg-blue-100 dark:hover:bg-blue-800/50 transition" data-index="${index}">
+                            <div class="flex-1 text-left" dir="ltr">
+                                <span class="font-bold text-blue-700 dark:text-blue-300">${escapeHtml(h.word || term)}</span>
+                                ${posLabel ? `<span class="text-xs bg-blue-200 dark:bg-blue-700 text-blue-800 dark:text-blue-200 rounded px-1.5 py-0.5 mr-2 font-normal" dir="rtl">${escapeHtml(posLabel)}</span>` : ''}
+                            </div>
+                            ${h.meaning ? `<div class="text-sm text-gray-700 dark:text-gray-300 text-right font-normal" dir="rtl">${escapeHtml(h.meaning)}</div>` : ''}
+                        </button>`;
+                    }).join('')}
+                </div>
+                <p class="text-xs text-gray-400 text-center mt-3 text-content-rtl">هر ریشه به صورت کارت مستقل ذخیره می‌شود و داده‌های ریشه‌های دیگر در آن وارد نخواهد شد.</p>
+                <button id="new-search-btn" class="w-full mt-3 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 p-3 rounded-xl font-bold hover:bg-gray-300 dark:hover:bg-gray-600 transition text-content-rtl">لغو و جستجوی جدید</button>
             `;
             aiResult.classList.remove('hidden');
             aiResult.scrollIntoView({ behavior: 'auto', block: 'start' });
@@ -18169,10 +18188,15 @@ CRITICAL — HOMOGRAPH DISAMBIGUATION: The user was shown multiple unrelated lex
                         pendingHomographCallback(searchWord, chosen, others);
                         pendingHomographCallback = null;
                     } else {
+                        // CRITICAL FIX: set the homograph hint THEN call analyzeTerm with
+                        // forceRefresh=true so all caches (temp, local, global) are bypassed.
+                        // consumeHomographHint() inside startWordAnalysis will use the hint
+                        // to set bypassAiPreflight=true (no second preflight needed) AND
+                        // inject the disambiguation instruction into the AI prompt.
                         setHomographResolution(searchWord, buildHomographHint(chosen, others));
                         searchInput.value = searchWord;
                         syncSearchInputLayout();
-                        analyzeTerm(searchWord);
+                        analyzeTerm(searchWord, true);  // forceRefresh=true: bypass all caches
                     }
                 }
             }
