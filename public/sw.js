@@ -35,8 +35,17 @@ self.addEventListener('install', event => {
         return Promise.all(URLS_TO_CACHE.map(u => cache.add(u).catch(() => {})));
       })
   );
-  // Force the waiting service worker to become the active service worker immediately
-  self.skipWaiting();
+  // NOTE: intentionally NOT calling self.skipWaiting() here anymore. Forcing
+  // immediate activation meant any spuriously "new" sw.js (e.g. a CDN edge
+  // node returning byte-different-but-functionally-identical content) would
+  // take over every open tab mid-session via clients.claim() below, firing
+  // controllerchange and forcing an immediate reload — which, since the app
+  // also force-checks for updates on every load, could loop until the CDN
+  // settled. Leaving this out means an update just waits (standard SW
+  // lifecycle) and only takes control on the next natural full page load,
+  // instead of yanking the rug out from under an in-progress session.
+  // The page can still request an immediate update via the existing
+  // 'SKIP_WAITING' postMessage handler below if that's ever genuinely needed.
 });
 
 // Cache and return requests
