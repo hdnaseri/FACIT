@@ -1,22 +1,22 @@
 
-const CACHE_NAME = 'facit-cache-v14.2.7';
+const CACHE_NAME = 'facit-cache-v14.3.0';
 const DEBUG = false;
 const URLS_TO_CACHE = [
   '/',
   'index.html',
   'manifest.json',
   'tailwind.css',
-  'api-utils.js',
+  'api-utils-v2.js',
   'vendor/fontawesome/css/all.min.css',
+  // 🚀 MEMORY FIX (مرحله ۶): قبلاً هر سه فرمت woff2/woff/ttf برای هر فونت کش می‌شد
+  // (۹ فایل). امروز همه‌ی مرورگرها (از جمله سافاری آیفون) از woff2 پشتیبانی می‌کنن
+  // و مرورگر هیچ‌وقت سراغ فرمت‌های پایین‌تر (woff/ttf) نمی‌ره، پس نگه‌داشتنشون در
+  // Cache Storage فقط فضای اضافه (~۲ برابر) روی دستگاه اشغال می‌کرد بدون این‌که
+  // هیچ‌وقت استفاده بشه. اگر یک مرورگر خیلی قدیمی این فایل‌ها رو خواست، همچنان از
+  // شبکه fetch و کش می‌شن (طبق منطق موجود در بخش «font-awesome» پایین‌تر).
   'vendor/fontawesome/webfonts/fa-brands-400.woff2',
   'vendor/fontawesome/webfonts/fa-regular-400.woff2',
   'vendor/fontawesome/webfonts/fa-solid-900.woff2',
-  'vendor/fontawesome/webfonts/fa-brands-400.woff',
-  'vendor/fontawesome/webfonts/fa-regular-400.woff',
-  'vendor/fontawesome/webfonts/fa-solid-900.woff',
-  'vendor/fontawesome/webfonts/fa-brands-400.ttf',
-  'vendor/fontawesome/webfonts/fa-regular-400.ttf',
-  'vendor/fontawesome/webfonts/fa-solid-900.ttf',
   'vendor/chartjs/chart.umd.min.js',
   'icons/FACIT.png',
   'icons/icon-192x192.png',

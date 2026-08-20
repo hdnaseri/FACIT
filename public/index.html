@@ -4630,6 +4630,25 @@ let __lastKnownWordUpdateDerivedResult = null;
         let prepositionPhraseMeaningIndex = new Map(); // normalized phrase -> meaning
         let prepositionPhraseMeaningPrefixIndex = new Map(); // normalized verb+prep prefix -> meaning
         const globalWordRecordCache = new Map();
+        // 🚀 SAFE MEMORY FIX: این کش نتیجه‌ی جستجوی «کلمات جهانی» (کلماتی که هنوز به بانک
+        // شخصی کاربر اضافه نشدن) رو نگه می‌داره. قبلاً هیچ سقفی نداشت — توی یک سشن طولانی
+        // که کاربر کلمات زیادی رو سرچ می‌کنه (بدون ذخیره‌شون)، این می‌تونست پیوسته رشد کنه.
+        // چون این صرفاً یک کش نتیجه‌ی سرچه (نه دیتای ذخیره‌شده‌ی کاربر)، محدودکردنش هیچ
+        // ریسک از دست رفتن دیتا نداره — فقط یعنی یک جستجوی خیلی قدیمی‌تر دوباره از سرور
+        // (به‌جای حافظه) خونده می‌شه.
+        const GLOBAL_WORD_RECORD_CACHE_MAX = 60;
+        function globalWordRecordCacheSet(key, value) {
+            try {
+                if (!key) return;
+                if (globalWordRecordCache.has(key)) globalWordRecordCache.delete(key);
+                globalWordRecordCache.set(key, value);
+                while (globalWordRecordCache.size > GLOBAL_WORD_RECORD_CACHE_MAX) {
+                    const oldestKey = globalWordRecordCache.keys().next().value;
+                    if (oldestKey === undefined) break;
+                    globalWordRecordCache.delete(oldestKey);
+                }
+            } catch (e) {}
+        }
         const PREPOSITION_TRIVIAL_MEANINGS = new Set([
             'از', 'به', 'در', 'با', 'روی', 'برای', 'درباره', 'به سمت', 'تا',
             'به سوی', 'از طرف', 'به منظور', 'بر روی', 'توسط', 'از طریق'
@@ -5017,6 +5036,284 @@ let __lastKnownWordUpdateDerivedResult = null;
         let __rebuildIndexesVersion = 0;
 
         // Build search indexes from cache array
+        // ═══════════════════════════════════════════════════════════════
+        // 🚀 MEMORY/SPEED FIX (مرحله ۱۰-الف): زیرساخت ایندکس مشتق‌شده‌ی هر کلمه
+        // ═══════════════════════════════════════════════════════════════
+        // این بخش، فقط زیرساخت رو می‌سازه — هنوز هیچ تابع سرچ/اتوکامپلیتی به این
+        // ایندکس‌ها وصل نشده و هیچ فیلدی از حافظه حذف نمی‌شه. یعنی رفتار فعلی اپ
+        // دقیقاً همونیه که بود؛ این فقط یک لایه‌ی جدید و موازیه که در مراحل بعدی
+        // (۱۰-ب به بعد) توابع سرچ یکی‌یکی بهش وصل می‌شن.
+        //
+        // چرا لازمه: توابع سرچ/اتوکامپلیت فعلی هر بار (هر keystroke) کل فیلدهای
+        // تودرتوی aiData (nounForms/verbConjugations/adjectiveForms/collocations/
+        // examples) رو برای هر ۸۰۰۰ کلمه از نو پیمایش می‌کنن. با محاسبه‌ی یک‌بارِ
+        // این ایندکس‌ها (موقع لود/آپدیت هر کلمه) هم سرعتِ سرچ خیلی بالا میره (چون
+        // دیگه نیازی به پیمایش تکراری نیست) و هم در گام‌های بعدی امکان حذف امنِ
+        // خودِ فیلدهای سنگین از حافظه‌ی مقیم فراهم می‌شه.
+        function extractSearchCandidateStrings(node, into) {
+            if (!node) return;
+            if (typeof node === 'string' || typeof node === 'number') {
+                const s = String(node).trim();
+                if (!s) return;
+                try {
+                    const n = normalizeText(s);
+                    if (n) into.add(n);
+                } catch (e) {}
+                try {
+                    const stripped = stripLeadingMarkersRaw(s);
+                    const ns = normalizeText(stripped);
+                    if (ns) into.add(ns);
+                } catch (e) {}
+                try {
+                    const pair = splitMeaningPairSmart(s);
+                    if (pair && pair.word) {
+                        const nw = normalizeText(pair.word);
+                        if (nw) into.add(nw);
+                        const strippedWord = normalizeText(stripLeadingMarkersRaw(pair.word));
+                        if (strippedWord) into.add(strippedWord);
+                    }
+                } catch (e) {}
+                return;
+            }
+            if (Array.isArray(node)) {
+                for (const x of node) extractSearchCandidateStrings(x, into);
+                return;
+            }
+            if (typeof node === 'object') {
+                for (const k of Object.keys(node)) extractSearchCandidateStrings(node[k], into);
+            }
+        }
+
+        // برای هر کلمه سه مجموعه‌ی رشته‌ی نرمال‌شده می‌سازه — دقیقاً همون سه دسته‌ای
+        // که aiDataIncludesSearchTerm امروز حین هر سرچ از نو می‌سازه:
+        //   __scCore   → analysisOf / baseForm (همیشه چک می‌شه)
+        //   __scMorph  → nounForms / verbConjugations / adjectiveForms (همیشه چک می‌شه)
+        //   __scPhrase → searchedTerm / collocations / examples (فقط برای عبارت‌های چندکلمه‌ای)
+        // جدا نگه‌داشتن این سه گروه لازمه تا رفتار فعلی (مثلاً این‌که یک کلمه‌ی
+        // تک‌واژه‌ای نباید به‌خاطر متن یک مثال نامرتبط match بشه) دقیقاً حفظ بشه.
+        // getNounDisplayTerm/getAdjDisplayTerm: دقیقاً همون منطق استخراج «فرم نمایشی» که قبلاً
+        // تابع پیشنهاد معنایی فارسی (خط ~۴۰۶۷۸) خودش هر بار حین سرچ محاسبه می‌کرد.
+        function __derivedNounDisplayTerm(nf) {
+            if (!nf || typeof nf !== 'object') return '';
+            if (typeof nf.indefiniteSingular === 'string' && nf.indefiniteSingular.trim()) return nf.indefiniteSingular.trim();
+            if (typeof nf.common === 'string' && nf.common.trim()) return nf.common.trim();
+            for (const v of Object.values(nf)) if (typeof v === 'string' && v.trim() && !/[\u0600-\u06FF]/.test(v)) return v.trim();
+            return '';
+        }
+        function __derivedAdjDisplayTerm(af) {
+            if (!af || typeof af !== 'object') return '';
+            if (typeof af.positive === 'string' && af.positive.trim()) return af.positive.trim();
+            if (typeof af.common === 'string' && af.common.trim()) return af.common.trim();
+            for (const v of Object.values(af)) if (typeof v === 'string' && v.trim() && !/[\u0600-\u06FF]/.test(v)) return v.trim();
+            return '';
+        }
+
+        // 🚀 MEMORY/SPEED FIX (مرحله ۱۰-پ): لیست از پیش‌ساخته‌ی «معنی‌های مشتق» هر کلمه —
+        // دقیقاً همون چیزی که دو تابع پیشنهاد معنایی (توابع consider/pushCandidate) هر بار
+        // حین تایپ از نو از nounForms/adjectiveForms/verbConjugations/wordFamily می‌سازن.
+        // rank دقیقاً همون مقادیری‌یه که خودِ اون توابع قبلاً استفاده می‌کردن (۲ برای اسم/فعل/
+        // خانواده‌واژه، ۳ برای صفت) تا نتیجه‌ی نهایی هیچ فرقی نکنه.
+        function buildWordDerivedMeanings(word) {
+            const list = [];
+            try {
+                const aiData = word && word.aiData;
+                if (aiData && typeof aiData === 'object') {
+                    if (Array.isArray(aiData.nounForms)) {
+                        for (const nf of aiData.nounForms) {
+                            if (!nf || typeof nf.meaning === 'undefined') continue;
+                            list.push({ kind: 'noun', meaning: nf.meaning, rank: 2, displayTerm: __derivedNounDisplayTerm(nf) || null });
+                        }
+                    }
+                    if (Array.isArray(aiData.adjectiveForms)) {
+                        for (const af of aiData.adjectiveForms) {
+                            if (!af || typeof af.meaning === 'undefined') continue;
+                            list.push({ kind: 'adjective', meaning: af.meaning, rank: 3, displayTerm: __derivedAdjDisplayTerm(af) || null });
+                        }
+                    }
+                    if (aiData.verbConjugations && typeof aiData.verbConjugations.verbMeaning === 'string') {
+                        const vinf = aiData.verbConjugations?.infinitive;
+                        list.push({ kind: 'verb', meaning: aiData.verbConjugations.verbMeaning, rank: 2, displayTerm: (typeof vinf === 'string' && vinf.trim()) ? vinf.trim() : (word.originalTerm || null) });
+                    }
+                    if (Array.isArray(aiData.wordFamily)) {
+                        for (const entry of aiData.wordFamily) {
+                            const s = typeof entry === 'string' ? entry : '';
+                            const colon = s.indexOf(':');
+                            if (colon === -1) continue;
+                            const meaningPart = s.slice(0, colon).trim();
+                            const wordPart = s.slice(colon + 1).trim();
+                            if (!meaningPart) continue;
+                            list.push({ kind: 'wordFamily', meaning: meaningPart, rank: 2, displayTerm: wordPart || null });
+                        }
+                    }
+                }
+            } catch (e) {}
+            return list;
+        }
+
+        // pickDerivedCandidateFromObj: عیناً همون تابعی که قبلاً تابع پیشنهاد «کلمات مشتق برای
+        // افزودن خودکار» هر بار حین سرچ برای انتخاب فرم نمایشیِ یک شکل صرف‌شده استفاده می‌کرد.
+        function __vdPickCandidate(obj) {
+            try {
+                if (!obj || typeof obj !== 'object') return '';
+                let candidate = '';
+                for (const [k, v] of Object.entries(obj)) {
+                    if (k === 'meaning') continue;
+                    if (typeof v !== 'string') continue;
+                    const vv = v.trim();
+                    if (!vv) continue;
+                    const keyLower = String(k).toLowerCase();
+                    const isArticleBase = /^(en|et)\s+/i.test(vv);
+                    const isBaseKey = ((keyLower.includes('indef') && keyLower.includes('sing')) || isArticleBase);
+                    if (isBaseKey) { candidate = vv; break; }
+                    if (!candidate) candidate = vv;
+                }
+                return candidate;
+            } catch (e) {
+                return '';
+            }
+        }
+
+        // جستجوی «شکل نظیر» همین کلمه در nounForms/adjectiveForms خودش — این همون تلاش
+        // fallback برای پیدا کردن معنیِ یک عبارت wordFamily وقتی خودِ کلمه هنوز ذخیره نشده.
+        function __vdFindOwnFormMeaning(aiData, daPart) {
+            try {
+                const tN = normalizeText(daPart);
+                const tS = stripDanishArticles(daPart);
+                if (!tN && !tS) return '';
+                const adj = aiData?.adjectiveForms;
+                if (Array.isArray(adj)) {
+                    for (const af of adj) {
+                        if (!af || typeof af !== 'object') continue;
+                        for (const [k, v] of Object.entries(af)) {
+                            if (k === 'meaning') continue;
+                            if (typeof v !== 'string') continue;
+                            const vN = normalizeText(v);
+                            const vS = stripDanishArticles(v);
+                            if ((vN && tN && vN === tN) || (vS && tS && vS === tS)) {
+                                return (typeof af.meaning === 'string') ? af.meaning : '';
+                            }
+                        }
+                    }
+                }
+                const nounRaw = aiData?.nounForms;
+                const nounArr = Array.isArray(nounRaw) ? nounRaw : (nounRaw && typeof nounRaw === 'object' ? [nounRaw] : []);
+                for (const nf of nounArr) {
+                    if (!nf || typeof nf !== 'object') continue;
+                    for (const [k, v] of Object.entries(nf)) {
+                        if (k === 'meaning') continue;
+                        if (typeof v !== 'string') continue;
+                        const vN = normalizeText(v);
+                        const vS = stripDanishArticles(v);
+                        if ((vN && tN && vN === tN) || (vS && tS && vS === tS)) {
+                            return (typeof nf.meaning === 'string') ? nf.meaning : '';
+                        }
+                    }
+                }
+            } catch (e) {}
+            return '';
+        }
+
+        // 🚀 MEMORY/SPEED FIX (مرحله ۱۰-ت): پیش‌محاسبه‌ی «کاندیدهای مشتق مجازی» — همون کاری
+        // که تابع پیشنهاد افزودن خودکار (که کلمات مشتق‌نشده رو از nounForms/adjectiveForms/
+        // wordFamily پیدا می‌کنه تا اگه معنیش با سرچ جور بود پیشنهاد بده) قبلاً هر بار حین
+        // تایپ از نو انجام می‌داد. بخشی از منطق اصلی (findSavedWordByTerm) به بانک کلمات دیگه
+        // وابسته‌ست و نمی‌شه از پیش محاسبه‌ش کرد؛ فقط اون بخشی که مختص خودِ همین کلمه‌ست
+        // (استخراج candidate و fallback-meaning از فیلدهای خودش) از پیش محاسبه می‌شه.
+        function buildWordVirtualDerivedIndex(word) {
+            const derived = [];
+            const wordFamily = [];
+            try {
+                const aiData = word && word.aiData;
+                if (aiData && typeof aiData === 'object') {
+                    const nounFormsAny = aiData.nounForms;
+                    const processNounEntry = (nf) => {
+                        if (!nf || typeof nf !== 'object') return;
+                        const candidate = __vdPickCandidate(nf);
+                        if (candidate) derived.push({ meaning: nf.meaning, candidate });
+                    };
+                    if (Array.isArray(nounFormsAny)) nounFormsAny.forEach(processNounEntry);
+                    else if (nounFormsAny && typeof nounFormsAny === 'object') processNounEntry(nounFormsAny);
+
+                    if (Array.isArray(aiData.adjectiveForms)) {
+                        for (const af of aiData.adjectiveForms) {
+                            if (!af || typeof af !== 'object') continue;
+                            const candidate = (() => {
+                                for (const k of ['common', 'positive', 'neuter', 'plural', 'definite', 'comparative', 'superlative']) {
+                                    const v = af?.[k];
+                                    if (typeof v === 'string' && v.trim()) return v.trim();
+                                }
+                                return __vdPickCandidate(af);
+                            })();
+                            if (candidate) derived.push({ meaning: af.meaning, candidate });
+                        }
+                    }
+
+                    if (Array.isArray(aiData.wordFamily)) {
+                        for (const wfItem of aiData.wordFamily) {
+                            if (typeof wfItem !== 'string') continue;
+                            const raw = wfItem.trim();
+                            if (!raw) continue;
+                            const idx = raw.indexOf(':');
+                            if (idx === -1) continue;
+                            const a = raw.slice(0, idx).trim();
+                            const b = raw.slice(idx + 1).trim();
+                            if (!a || !b) continue;
+                            const aIsFa = /[\u0600-\u06FF]/.test(a) && !/[a-zæøå]/i.test(a);
+                            const bIsFa = /[\u0600-\u06FF]/.test(b) && !/[a-zæøå]/i.test(b);
+                            let faPart = '', daPart = '';
+                            if (aIsFa && !bIsFa) { faPart = a; daPart = b; }
+                            else if (!aIsFa && bIsFa) { faPart = b; daPart = a; }
+                            else continue;
+                            const fallbackMeaning = __vdFindOwnFormMeaning(aiData, daPart);
+                            wordFamily.push({ faPart, daPart, fallbackMeaning });
+                        }
+                    }
+                }
+            } catch (e) {}
+            return { derived, wordFamily };
+        }
+
+        function buildWordDerivedIndexes(word) {
+            if (!word) return;
+            try {
+                const aiData = word.aiData;
+                if (!aiData || typeof aiData !== 'object') {
+                    word.__scCore = new Set();
+                    word.__scMorph = new Set();
+                    word.__scPhrase = new Set();
+                    word.__derivedMeanings = [];
+                    word.__vdIndex = { derived: [], wordFamily: [] };
+                    return;
+                }
+                const core = new Set();
+                if (aiData.analysisOf) extractSearchCandidateStrings(aiData.analysisOf, core);
+                if (aiData.baseForm) extractSearchCandidateStrings(aiData.baseForm, core);
+
+                const morph = new Set();
+                extractSearchCandidateStrings(aiData.nounForms, morph);
+                extractSearchCandidateStrings(aiData.verbConjugations, morph);
+                extractSearchCandidateStrings(aiData.adjectiveForms, morph);
+
+                const phrase = new Set();
+                if (aiData.searchedTerm) extractSearchCandidateStrings(aiData.searchedTerm, phrase);
+                extractSearchCandidateStrings(aiData.collocations, phrase);
+                extractSearchCandidateStrings(aiData.examples, phrase);
+
+                word.__scCore = core;
+                word.__scMorph = morph;
+                word.__scPhrase = phrase;
+                word.__derivedMeanings = buildWordDerivedMeanings(word);
+                word.__vdIndex = buildWordVirtualDerivedIndex(word);
+            } catch (e) {
+                word.__scCore = word.__scCore || new Set();
+                word.__scMorph = word.__scMorph || new Set();
+                word.__scPhrase = word.__scPhrase || new Set();
+                word.__derivedMeanings = word.__derivedMeanings || [];
+                word.__vdIndex = word.__vdIndex || { derived: [], wordFamily: [] };
+            }
+        }
+
+
         async function rebuildSearchIndexes() { try { if (typeof invalidateSearchIndex === 'function') invalidateSearchIndex(); } catch(e) {} 
             __rebuildIndexesVersion++;
             const currentVersion = __rebuildIndexesVersion;
@@ -5071,6 +5368,9 @@ let __lastKnownWordUpdateDerivedResult = null;
                             translationIndex.set(normTrans, word);
                         }
                     }
+
+                    // 🚀 مرحله ۱۰-الف: ساخت ایندکس مشتق‌شده (فعلاً مصرف‌کننده‌ای نداره، فقط آماده‌سازیه)
+                    buildWordDerivedIndexes(word);
                 }
                 
                 // yield to main thread
@@ -5138,6 +5438,9 @@ let __lastKnownWordUpdateDerivedResult = null;
                 const normTrans = normalizeText(nextWord.aiData.translation);
                 if (normTrans) translationIndex.set(normTrans, nextWord);
             }
+
+            // 🚀 مرحله ۱۰-الف: هر بار یک کلمه تک‌تک آپدیت/اضافه می‌شه، ایندکس مشتق‌شده‌ش هم تازه بشه
+            try { buildWordDerivedIndexes(nextWord); } catch (e) {}
         }
 
         function syncWordIntoLocalCaches(nextWord, options = {}) {
@@ -5566,7 +5869,11 @@ let __lastKnownWordUpdateDerivedResult = null;
         // chosen/others data a bit later — once the AI response for that term comes back —
         // so it can be attached to the saved word (aiData.homographChoice) and shown to the
         // user later via the "ریشه‌های مشترک" badge on the word modal.
-        let pendingHomographChoiceMeta = { term: null, chosen: null, others: null };
+        // BUGFIX (same race condition class as pendingConfirmedSingleRootTerms above):
+        // this used to be a single-slot object, overwritten by ANY subsequent homograph
+        // pick that happened before the FIRST pick's generation finished. A Map keyed by
+        // normalized term lets multiple concurrent picks coexist.
+        const pendingHomographChoiceMetaByTerm = new Map();
         // The preflight homograph check (runSearchPreflightCheck) calls the AI to ask
         // "is this term a homograph of multiple unrelated roots?" for EVERY new search
         // that isn't bypassed. When the answer is "no" (0 or 1 candidates — the common
@@ -5576,14 +5883,34 @@ let __lastKnownWordUpdateDerivedResult = null;
         // "missing root confirmation" despite having already been checked. Track the
         // term here so attachHomographChoiceIfPending can stamp isSingleRoot on it,
         // the same way it already does for the explicit-pick case.
-        let pendingConfirmedSingleRootTerm = null;
+        //
+        // BUGFIX (race condition): this used to be a single scalar
+        // (`pendingConfirmedSingleRootTerm = term`) that could only remember ONE
+        // in-flight confirmation at a time. Preflight for term A resolves almost
+        // instantly, but the full AI generation that CONSUMES that confirmation
+        // (attachHomographChoiceIfPending, called only once generation finishes) can
+        // take several seconds. If ANY other preflight check ran during that window
+        // (a parallel/subsequent search, a debounced re-search, a background
+        // operation) it silently overwrote this single slot with a different term —
+        // so by the time term A's generation finished, its own confirmation had
+        // already been clobbered by term B's, and consumeConfirmedSingleRoot(A)
+        // returned false even though A genuinely was checked and cleared moments
+        // earlier. Real-world case: user searches "øvrig" — preflight confirms it,
+        // but before that word's full generation finishes, some other preflight
+        // check overwrites the slot, and "øvrig" ends up permanently flagged with
+        // "missing root confirmation" despite having been checked correctly.
+        // A Set keyed by normalized term lets multiple concurrent confirmations
+        // coexist without one clobbering another; each is only removed when its own
+        // matching term actually consumes it.
+        const pendingConfirmedSingleRootTerms = new Set();
         function markPreflightConfirmedSingleRoot(term) {
-            pendingConfirmedSingleRootTerm = (term || '').trim().toLowerCase();
+            const t = (term || '').trim().toLowerCase();
+            if (t) pendingConfirmedSingleRootTerms.add(t);
         }
         function consumeConfirmedSingleRoot(term) {
             const t = (term || '').trim().toLowerCase();
-            if (pendingConfirmedSingleRootTerm && t && pendingConfirmedSingleRootTerm === t) {
-                pendingConfirmedSingleRootTerm = null;
+            if (t && pendingConfirmedSingleRootTerms.has(t)) {
+                pendingConfirmedSingleRootTerms.delete(t);
                 return true;
             }
             return false;
@@ -5591,8 +5918,8 @@ let __lastKnownWordUpdateDerivedResult = null;
         function setHomographResolution(term, hint, chosen, others) {
             const key = (term || '').trim().toLowerCase();
             homographResolution = { term: key, hint: hint || null };
-            if (chosen) {
-                pendingHomographChoiceMeta = { term: key, chosen: chosen, others: Array.isArray(others) ? others : [] };
+            if (chosen && key) {
+                pendingHomographChoiceMetaByTerm.set(key, { chosen: chosen, others: Array.isArray(others) ? others : [] });
             }
         }
         function clearHomographResolution() {
@@ -5620,10 +5947,12 @@ let __lastKnownWordUpdateDerivedResult = null;
         // disambiguated it. Returns null when there is nothing pending for this term.
         function consumeHomographChoiceMeta(term) {
             const t = (term || '').trim().toLowerCase();
-            if (pendingHomographChoiceMeta.term && t && pendingHomographChoiceMeta.term === t && pendingHomographChoiceMeta.chosen) {
-                const meta = { chosen: pendingHomographChoiceMeta.chosen, others: pendingHomographChoiceMeta.others || [] };
-                pendingHomographChoiceMeta = { term: null, chosen: null, others: null };
-                return meta;
+            if (t && pendingHomographChoiceMetaByTerm.has(t)) {
+                const stored = pendingHomographChoiceMetaByTerm.get(t);
+                pendingHomographChoiceMetaByTerm.delete(t);
+                if (stored && stored.chosen) {
+                    return { chosen: stored.chosen, others: stored.others || [] };
+                }
             }
             return null;
         }
@@ -8166,11 +8495,18 @@ A true homograph is when the EXACT input spelling "{term}" matches two or more C
   - Each entry: {"word": "the {language} word exactly as it should be searched/analyzed for this specific sense", "partOfSpeech": "noun|verb|adjective|adverb|other", "meaning": "short Persian gloss of THIS sense only"}.
   - Keep it to real, well-known, independently attested lexemes only — do not invent a second sense just to fill the array.
 
+ALSO provide a VERY short Persian preview meaning (a separate, lightweight field from the full analysis that will be requested later):
+- Only fill this in when isCorrect is true (or the input is Persian) AND intent is "word" or "phrase" AND there are NOT 2+ homographs (i.e. this is the normal single-meaning case). Otherwise leave both fields as empty strings "".
+- "quickMeaning": the shortest common Persian equivalent/meaning of "{term}" EXACTLY as typed, EVEN IF it is an inflected/conjugated/derived surface form and not the dictionary base form (do NOT resolve it to its root — just translate the exact given form). A few words or one short phrase, nothing more.
+- "partOfSpeechHint": the grammatical type of "{term}" in Persian (فعل/اسم/صفت/قید/عبارت), or an empty string if unclear.
+
 Respond in a single, valid JSON object:
 {
   "isCorrect": true | false,
   "suggestions": ["suggestion1", "suggestion2"],
   "intent": "word" | "phrase" | "question",
+  "quickMeaning": "کوتاه‌ترین معادل/معنی فارسی رایج این عبارت دقیقاً همان‌طور که جستجو شده، یا رشته خالی",
+  "partOfSpeechHint": "نوع دستوری این عبارت به فارسی یا رشته خالی",
   "homographs": [{"word": "...", "partOfSpeech": "...", "meaning": "..."}]
 }`;
         const similarSpellingPromptTemplate = `You are a linguistic assistant. For the {language} word "{term}", provide up to 5 other real {language} words that have SIMILAR SPELLING but DIFFERENT meanings.
@@ -8499,6 +8835,27 @@ Conversation History:
             'en-GB': 'en-GB-SoniaNeural'
         };
         const pronunciationMemoryCache = new Map();
+        // 🚀 SAFE MEMORY FIX (بدون هیچ ریسک از دست رفتن دیتا): این کش فقط یک کپی سریع
+        // در RAM از فایل‌های صوتی تلفظه که همین الانش هم به‌طور کامل و دائمی توی
+        // Cache Storage مرورگر (خط پایین‌تر، storeCachedPronunciationAudio) ذخیره شده.
+        // قبلاً این Map هیچ سقفی نداشت — هر بار کاربر روی هر دکمه‌ی تلفظی (حتی فقط با
+        // لمس/hover، بدون کلیک) لمس می‌کرد، یک بلاب صوتی جدید برای همیشه توی حافظه
+        // می‌موند و هیچ‌وقت آزاد نمی‌شد. این دقیقاً همون تعاملیه که موقع لمس/کلیک روی
+        // پیشنهادهای سرچ اتفاق می‌افته. چون نسخه‌ی اصلی همیشه در Cache Storage امنه،
+        // محدودکردن این کپیِ RAM هیچ دیتایی رو از دست نمی‌ده — فقط یعنی صداهای خیلی
+        // قدیمی‌تر یک بار دیگه (خیلی سریع) از Cache Storage به‌جای RAM خونده می‌شن.
+        const PRONUNCIATION_MEMORY_CACHE_MAX = 40;
+        function pronunciationMemoryCacheSet(key, value) {
+            try {
+                if (pronunciationMemoryCache.has(key)) pronunciationMemoryCache.delete(key);
+                pronunciationMemoryCache.set(key, value);
+                while (pronunciationMemoryCache.size > PRONUNCIATION_MEMORY_CACHE_MAX) {
+                    const oldestKey = pronunciationMemoryCache.keys().next().value;
+                    if (oldestKey === undefined) break;
+                    pronunciationMemoryCache.delete(oldestKey);
+                }
+            } catch (e) {}
+        }
         const DEFAULT_TTS_PROXY_URL = 'https://tts-proxy-05t2.onrender.com';
         function normalizeTtsProxyBaseUrl(url) {
             const normalized = String(url || '').trim().replace(/\/+$/, '');
@@ -9070,7 +9427,7 @@ Conversation History:
                     audioLanguageCode: String(response.headers.get('X-TTS-Language') || lang || '').trim(),
                     audioUpdatedAt: String(response.headers.get('X-TTS-Cached-At') || '').trim()
                 };
-                pronunciationMemoryCache.set(memKey, result);
+                pronunciationMemoryCacheSet(memKey, result);
                 return result;
             } catch (error) {
                 console.error('getCachedPronunciationAudio error:', error);
@@ -9081,7 +9438,7 @@ Conversation History:
         async function storeCachedPronunciationAudio(text, lang, pronunciation) {
             if (!(pronunciation?.audioBlob instanceof Blob) || !pronunciation.audioBlob.size) return;
             const memKey = getPronunciationCacheKey(text, lang);
-            pronunciationMemoryCache.set(memKey, pronunciation);
+            pronunciationMemoryCacheSet(memKey, pronunciation);
 
             if (!('caches' in window)) return;
             try {
@@ -15851,9 +16208,12 @@ Conversation History:
             return 0;
         }
 
-        // وقتی localStorage پر شده، قبل از تسلیم شدن، فضاهایی که واقعاً غیرضروری‌اند
-        // (کش داشبورد زبان‌های دیگر/کاربران قدیمی، کلید قدیمی بدون‌نسخه، و کش‌های
-        // موقت جست‌وجو/ترجمه که به‌راحتی دوباره ساخته می‌شوند) را آزاد می‌کنیم.
+        // 🚀 MEMORY FIX (مرحلهٔ ۴): قبلاً یک کپی کامل جداگانه از دادهٔ داشبورد (تا ۳ مگابایت) در
+        // localStorage ذخیره می‌شد — خود این یک بلوک حافظهٔ سنکرون بزرگ و sync بود. چون حالا
+        // dashboardWordsCache فقط رفرنس localWordsCache است (که خودش از طریق IndexedDB پایدار می‌ماند)،
+        // این کپی‌سازی دیگر لازم نیست. توابع پایین فقط برای سازگاری با فراخوانی‌های قدیمی
+        // (و پاک‌سازی یک‌بارهٔ کلید localStorage قدیمی روی دستگاه‌هایی که از قبل این fix آمده بودن) نگه داشته شده.
+        let __dashboardLegacyCacheCleaned = false;
         function freeUpLocalStorageSpaceForDashboardCache() {
             let freedAny = false;
             try {
@@ -15862,7 +16222,7 @@ Conversation History:
                 for (let i = 0; i < localStorage.length; i++) {
                     const k = localStorage.key(i);
                     if (!k) continue;
-                    if (k.startsWith(LOCAL_DASHBOARD_CACHE_KEY) && k !== myKey) keysToRemove.push(k);
+                    if (k.startsWith(LOCAL_DASHBOARD_CACHE_KEY)) keysToRemove.push(k);
                 }
                 keysToRemove.forEach(k => { try { localStorage.removeItem(k); freedAny = true; } catch (e) {} });
             } catch (e) {}
@@ -15871,213 +16231,51 @@ Conversation History:
             try { localStorage.removeItem(QUICK_TRANSLATE_CACHE_KEY); freedAny = true; } catch (e) {}
             return freedAny;
         }
-
-        // 🚀 ذخیره dashboard cache در localStorage — بهینه‌سازی شده با requestIdleCallback
-        function saveDashboardCacheToLocal() {
-            if (!currentUser || !dashboardWordsCache) return;
-            const _doSaveDash = () => {
-                const cacheKey = getLocalCacheKey(LOCAL_DASHBOARD_CACHE_KEY);
-                const buildCacheData = (wordCount) => ({
-                    version: LOCAL_CACHE_VERSION,
-                    userId: currentUser.uid,
-                    lang: getLanguageCode(learningLanguage),
-                    timestamp: Date.now(),
-                    words: dashboardWordsCache.slice(0, wordCount)
-                });
-
-                // محدودیت هوشمند: تا 2000 کلمه یا 3MB (کاهش از 5000)، و اگر باز هم به خطای
-                // quota خوردیم، به‌جای تسلیم شدن بعد از یک تلاش، اول فضای غیرضروری را
-                // آزاد می‌کنیم و بعد با تعداد کلمات کمتر و کمتر دوباره امتحان می‌کنیم.
-                const attempts = [2000, 1000, 500, 200];
-                let cleanedUpOnce = false;
-                for (let i = 0; i < attempts.length; i++) {
-                    try {
-                        const cacheData = buildCacheData(attempts[i]);
-                        const json = JSON.stringify(cacheData);
-                        if (i === 0 && json.length > 3 * 1024 * 1024) continue; // برو سراغ تعداد کمتر
-                        localStorage.setItem(cacheKey, json);
-                        try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log(`[Dashboard Cache] Saved ${cacheData.words.length} words`); } catch (e) {}
-                        return;
-                    } catch (e) {
-                        const isQuotaError = e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014);
-                        if (isQuotaError && !cleanedUpOnce) {
-                            cleanedUpOnce = true;
-                            if (freeUpLocalStorageSpaceForDashboardCache()) {
-                                i--; // همین تعداد کلمات را یک‌بار دیگر بعد از آزادسازی فضا امتحان کن
-                                continue;
-                            }
-                        }
-                        if (i === attempts.length - 1) {
-                            console.warn('[Dashboard Cache] Failed to save after cleanup + retries:', e.message);
-                            try { localStorage.removeItem(cacheKey); } catch (e2) {}
-                        }
-                    }
-                }
-            };
-            // 🚀 اجرا در زمان بیکاری CPU
-            if (typeof requestIdleCallback === 'function') {
-                requestIdleCallback(_doSaveDash, { timeout: 3000 });
-            } else {
-                setTimeout(_doSaveDash, 100);
+        // یک‌بار در هر سشن، بلوک ~۳ مگابایتی باقی‌مانده از نسخهٔ قبل را پاک کن.
+        try {
+            if (!__dashboardLegacyCacheCleaned) {
+                __dashboardLegacyCacheCleaned = true;
+                freeUpLocalStorageSpaceForDashboardCache();
             }
+        } catch (e) {}
+
+        // 🚀 MEMORY FIX (مرحله ۴): دیگر چیزی در localStorage ذخیره نمی‌شود — dashboardWordsCache
+        // همان رفرنس localWordsCache است که خودش از IndexedDB لود/پایدار می‌شود.
+        function saveDashboardCacheToLocal() {
+            // عمداً خالی — نگه داشته شده تا فراخوانی‌های قدیمی در کد خطا ندهند.
         }
 
-        // 🚀 لود dashboard cache از localStorage برای نمایش فوری
+        // 🚀 MEMORY FIX (مرحله ۲): به‌جای خواندن یک بلوب جدا از localStorage، مستقیماً
+        // به localWordsCache اشاره می‌کند — بدون کپی، بدون فچ جداگانه.
         function loadDashboardCacheFromLocal() {
             if (!currentUser) return false;
-            try {
-                const myKey = getLocalCacheKey(LOCAL_DASHBOARD_CACHE_KEY);
-                let json = localStorage.getItem(myKey);
-                if (!json) {
-                    try {
-                        const code = getLanguageCode(learningLanguage);
-                        if (code === 'da') {
-                            const legacy = localStorage.getItem('facit_dashboard_cache');
-                            if (legacy) {
-                                json = legacy;
-                                try { localStorage.setItem(myKey, legacy); } catch (e) {}
-                            }
-                        }
-                    } catch (e) {}
-                }
-                if (!json) return false;
-
-                const cacheData = JSON.parse(json);
-
-                if (cacheData.version !== LOCAL_CACHE_VERSION) {
-                    localStorage.removeItem(myKey);
-                    return false;
-                }
-
-                if (cacheData.userId !== currentUser.uid) {
-                    return false;
-                }
-
-                try {
-                    const code = getLanguageCode(learningLanguage);
-                    const cacheLang = cacheData.lang ? String(cacheData.lang) : 'da';
-                    if (cacheLang !== code) return false;
-                } catch (e) {}
-
-                dashboardWordsCache = cacheData.words;
-                try {
-                    sanitizeInvalidCollocationsInWordsCache(dashboardWordsCache).then(collocationFixes => {
-                        if (Array.isArray(collocationFixes) && collocationFixes.length > 0) {
-                            try { saveDashboardCacheToLocal(); } catch (e) {}
-                            try { persistInvalidCollocationFixesToFirestore(collocationFixes); } catch (e) {}
-                        }
-                    }).catch(e => {});
-                } catch (e) {}
-                dashboardWordsCacheLoadedAt = cacheData.timestamp;
-                try { if (localStorage.getItem('facit_debug_dashboard') === '1') console.log(`[Dashboard Cache] Loaded ${dashboardWordsCache.length} words from localStorage`); } catch (e) {}
-                return true;
-            } catch (e) {
-                console.warn('[Dashboard Cache] Failed to load:', e.message);
-                return false;
-            }
+            const words = Array.isArray(localWordsCache) ? localWordsCache : [];
+            dashboardWordsCache = words;
+            dashboardWordsCacheLoadedAt = words.length > 0 ? Date.now() : 0;
+            return words.length > 0;
         }
 
+        // 🚀 MEMORY FIX (مرحلهٔ ۲+۳): این تابع قبلاً یک کپی کامل و مستقل از کل بانک
+        // کلمات (تا ۲۰،۰۰۰ سند) دوباره از Firestore میگرفت و در یک آرایهی
+        // جداگانه (dashboardWordsCache) نگه می‌داشت — یعنی همیشه دو نسخهی کامل
+        // از کل داده در حافظه بود (یکی localWordsCache، یکی dashboardWordsCache).
+        // چون localWordsCache همین الان (از طریق IndexedDB + Firestore listener)
+        // کامل و به‌روز نگه داشته می‌شود، دیگر نیازی به یک fetch/کپی مستقل نیست.
+        // حالا dashboardWordsCache صرفاً همان رفرنس localWordsCache را نگه می‌دارد
+        // (بدون کپی، بدون fetch جداگانه) — نه حافظهٔ اضافه‌ای مصرف می‌شود و نه
+        // شبکه/باتری اضافه‌ای صرف یک fetch تکراری می‌شود.
         async function ensureDashboardWordsCacheLoaded(force = false) {
             if (!wordsCollectionRef) return [];
-
-			const sessionAtStart = __authSessionSeq;
-
-            const now = Date.now();
-
-            // 🚀 اول از localStorage لود کن برای نمایش فوری
-            if (!dashboardWordsCache && !force) {
-                loadDashboardCacheFromLocal();
-            }
-
-            // اگر cache معتبر است، برگردان
-            if (!force && dashboardWordsCache && (now - dashboardWordsCacheLoadedAt) < DASHBOARD_CACHE_TTL_MS) return dashboardWordsCache;
-
-            // اگر درخواست لود در جریان است
-            if (!force && dashboardWordsCacheLoadingPromise) {
-                // اگر دیتای قدیمی داریم، همان را برگردان (برای عدم بلاک شدن UI)
-                if (dashboardWordsCache && dashboardWordsCache.length > 0) {
-                    return dashboardWordsCache;
-                }
-                // اگر هیچی نداریم، منتظر بمان
-                return dashboardWordsCacheLoadingPromise;
-            }
-
-            // اگر cache لوکال داریم، اول آن را برگردان و در بکگراند آپدیت کن
-            const hasLocalCache = dashboardWordsCache && dashboardWordsCache.length > 0;
-
-			const loadSeqAtStart = ++__dashboardLoadSeq;
-			const myPromise = (async () => {
-                const pageSize = 1000;
-                const maxDocs = 20000;
-                const results = [];
-                let lastDoc = null;
-
-                const tryGetDocs = async (qq) => {
-                    if (typeof getDocsFromCache === 'function') {
-                        try {
-                            const cacheSnap = await getDocsFromCache(qq);
-                            if (cacheSnap && !cacheSnap.empty) return cacheSnap;
-                        } catch (e2) {}
-                    }
-                    return await getDocs(qq);
-                };
-
-                while (results.length < maxDocs) {
-					if (__authSessionSeq !== sessionAtStart || __dashboardLoadSeq !== loadSeqAtStart || !wordsCollectionRef) break;
-                    let q = query(wordsCollectionRef, orderBy("createdAt", "desc"), limit(pageSize));
-                    if (lastDoc) {
-                        q = query(wordsCollectionRef, orderBy("createdAt", "desc"), startAfter(lastDoc), limit(pageSize));
-                    }
-                    let snapshot;
-                    try {
-                        snapshot = await tryGetDocs(q);
-                    } catch (e) {
-                        if (results.length > 0) break;
-                        throw e;
-                    }
-					if (__authSessionSeq !== sessionAtStart || __dashboardLoadSeq !== loadSeqAtStart || !wordsCollectionRef) break;
-                    if (snapshot.empty) break;
-
-                    snapshot.docs.forEach(d => results.push({ id: d.id, ...d.data({ serverTimestamps: 'estimate' }) }));
-                    lastDoc = snapshot.docs[snapshot.docs.length - 1];
-
-                    await new Promise(r => setTimeout(r, 0));
-
-                    if (snapshot.docs.length < pageSize) break;
-                }
-
-				if (__authSessionSeq !== sessionAtStart || __dashboardLoadSeq !== loadSeqAtStart || !wordsCollectionRef) return dashboardWordsCache || [];
-
-                dashboardWordsCache = results;
-                try {
-                    const collocationFixes = await sanitizeInvalidCollocationsInWordsCache(dashboardWordsCache);
-                    if (Array.isArray(collocationFixes) && collocationFixes.length > 0) {
-                        try { persistInvalidCollocationFixesToFirestore(collocationFixes); } catch (e) {}
-                    }
-                } catch (e) {}
-                dashboardWordsCacheLoadedAt = Date.now();
-
-                // 🚀 ذخیره در localStorage برای دفعات بعدی
-                saveDashboardCacheToLocal();
-
-                return dashboardWordsCache;
-            })();
-
-			dashboardWordsCacheLoadingPromise = myPromise;
-
-            			// 🚀 اگر cache لوکال داریم، فوراً برگردان و در بکگراند آپدیت کن
-            if (hasLocalCache && !force) {
-                myPromise.catch(() => {});
-                return dashboardWordsCache;
-            }
-
             try {
-                return await myPromise;
-            } catch (e) {
-                return dashboardWordsCache || [];
-            } finally {
-				if (dashboardWordsCacheLoadingPromise === myPromise) dashboardWordsCacheLoadingPromise = null;
-            }
+                if ((!Array.isArray(localWordsCache) || localWordsCache.length === 0) && currentUser) {
+                    if ((localWordsCache?.length || 0) === 0 && (wordIdIndex?.size || 0) === 0) {
+                        await loadLocalWordsCache();
+                    }
+                }
+            } catch (e) {}
+            dashboardWordsCache = Array.isArray(localWordsCache) ? localWordsCache : [];
+            dashboardWordsCacheLoadedAt = Date.now();
+            return dashboardWordsCache;
         }
         async function ensureNotesCacheLoaded() {
             if (!notesCollectionRef) return;
@@ -16908,7 +17106,7 @@ Rules:
                             wordTerm === searchWithoutAt ||
                             wordBaseForm === searchWithoutAt) return true;
 
-                        return aiDataIncludesSearchTerm(w.aiData, searchLower);
+                        return aiDataIncludesSearchTerm(w.aiData, searchLower, (w.__scCore instanceof Set) ? { core: w.__scCore, morph: w.__scMorph, phrase: w.__scPhrase } : null);
                     })
                     || localWordsCache.find(w => {
                         if (!w || !w.aiData) return false;
@@ -16925,7 +17123,7 @@ Rules:
                             wordAnalysisOf === searchWithoutAt ||
                             wordBaseForm === searchWithoutAt) return true;
 
-                        return aiDataIncludesSearchTerm(w.aiData, searchLower);
+                        return aiDataIncludesSearchTerm(w.aiData, searchLower, (w.__scCore instanceof Set) ? { core: w.__scCore, morph: w.__scMorph, phrase: w.__scPhrase } : null);
                     });
 
                 const canUseExistingWordCache = isUsableCurrentWordRecord(existingWord);
@@ -17020,35 +17218,11 @@ Rules:
             aiResult.classList.add('hidden');
         }
 
-        async function fetchPreflightQuickMeaning(term) {
-            const prompt = `Give a VERY short Persian preview meaning of the ${learningLanguage} word/phrase "${term}" as it is actually used, EVEN IF "${term}" is an inflected, conjugated, or otherwise derived surface form and NOT the dictionary base/root form (do NOT try to resolve it to its root — just translate the exact form given). This is only a quick temporary preview shown to the user while the full detailed analysis loads in the background, so keep it extremely brief (a few words or one short phrase).
-
-Respond with a single valid JSON object, no other text:
-{
-  "quickMeaning": "کوتاه‌ترین معادل/معنی فارسی رایج این عبارت دقیقاً همان‌طور که جستجو شده",
-  "partOfSpeechHint": "نوع دستوری این عبارت به فارسی (فعل/اسم/صفت/قید/عبارت) یا رشته خالی اگر نامشخص است"
-}`;
-            const raw = await callGeminiAPI(
-                { temperature: 0.2, response_mime_type: "application/json" },
-                [{ role: "user", parts: [{ text: prompt }] }],
-                { intent: 'quick' }
-            );
-            let data = raw;
-            if (typeof raw === 'string') {
-                try {
-                    let cleanText = raw.replace(/```json|```/g, '').trim();
-                    const firstOpen = cleanText.indexOf('{');
-                    const lastClose = cleanText.lastIndexOf('}');
-                    if (firstOpen !== -1 && lastClose !== -1) {
-                        cleanText = cleanText.substring(firstOpen, lastClose + 1);
-                    }
-                    data = JSON.parse(cleanText);
-                } catch (e) {
-                    data = null;
-                }
-            }
-            return data;
-        }
+        // توجه: قبلاً اینجا یک تابع fetchPreflightQuickMeaning جداگانه بود که با یک تماس
+        // AI مستقل، فقط معنی موقت را می‌گرفت. این تماس جداگانه حذف شد — «معنی موقت» اکنون
+        // به‌عنوان فیلدهای quickMeaning/partOfSpeechHint در همان پاسخِ بررسی غلط املایی/هوموگراف
+        // (correctionPromptTemplate در runSearchPreflightCheck) برگردانده می‌شود، تا بین دو
+        // تماس اول و دوم به AI هیچ فاصله/تماس اضافه‌ای نباشد.
 
         function renderPreflightMeaningBox(term, data) {
             preflightMeaningActiveTerm = term;
@@ -17072,21 +17246,6 @@ Respond with a single valid JSON object, no other text:
             `;
             aiResult.classList.remove('hidden');
             aiResult.scrollIntoView({ behavior: 'auto', block: 'start' });
-        }
-
-        // فراخوانی می‌شود درست پیش از برگرداندن null از runSearchPreflightCheck (یعنی
-        // درست پیش از اینکه فراخواننده به سراغ درخواست پرامپت اصلی برود). خطا در این تابع
-        // هرگز نباید روند اصلی جستجو را متوقف کند — فقط یک نمایش کمکی/اختیاری است.
-        async function showPreflightQuickMeaningBox(term, opId) {
-            try {
-                if (!isSearchOperationActive(opId)) return;
-                const data = await fetchPreflightQuickMeaning(term);
-                if (!isSearchOperationActive(opId)) return;
-                if (!data || !data.quickMeaning) return;
-                renderPreflightMeaningBox(term, data);
-            } catch (e) {
-                // بی‌صدا رد شو — این فقط یک پیش‌نمایش کمکی است و نباید جلوی ادامه‌ی جستجو را بگیرد.
-            }
         }
 
         // بررسی غلط املایی + تشخیص چند-ریشه‌ای (هوموگراف) بودن کلمه، پیش از هر تحلیل یا
@@ -17160,12 +17319,16 @@ Respond with a single valid JSON object, no other text:
                 markPreflightConfirmedSingleRoot(term);
             }
 
-            // درست پیش از برگرداندن null (یعنی پیش از اینکه فراخواننده پرامپت اصلی را درخواست
-            // کند)، یک معنی خیلی سریع و موقت از خودِ عبارت جستجو‌شده نمایش داده می‌شود تا کاربر
-            // در حین انتظار برای پاسخ کامل، صفحه خالی نبیند. کاملاً موقتی است — نه در aiData
-            // ذخیره می‌شود و نه در مسیر بازیابی از کش قرار می‌گیرد.
-            if (isSearchOperationActive(opId)) {
-                await showPreflightQuickMeaningBox(term, opId);
+            // معنی خیلی سریع و موقت از خودِ عبارت جستجو‌شده نمایش داده می‌شود تا کاربر در حین
+            // انتظار برای پاسخ کامل، صفحه خالی نبیند. این معنی دیگر با یک تماس جداگانه به AI
+            // گرفته نمی‌شود — همان پاسخِ بررسی املا/هوموگراف (analysisData) این فیلد را هم
+            // همراه خودش برگردانده، پس نمایشش هیچ تاخیر یا تماس اضافه‌ای به AI ایجاد نمی‌کند.
+            // کاملاً موقتی است — نه در aiData ذخیره می‌شود و نه در مسیر بازیابی از کش قرار می‌گیرد.
+            if (isSearchOperationActive(opId) && analysisData.quickMeaning) {
+                renderPreflightMeaningBox(term, {
+                    quickMeaning: analysisData.quickMeaning,
+                    partOfSpeechHint: analysisData.partOfSpeechHint || ''
+                });
             }
 
             return null;
@@ -17393,7 +17556,7 @@ Example:
                                    wordTerm === searchWithoutAt ||
                                    wordBaseForm === searchWithoutAt) return true;
 
-                            return aiDataIncludesSearchTerm(w.aiData, searchLower);
+                            return aiDataIncludesSearchTerm(w.aiData, searchLower, (w.__scCore instanceof Set) ? { core: w.__scCore, morph: w.__scMorph, phrase: w.__scPhrase } : null);
                         })
                         || localWordsCache.find(w => {
                             if (!w || !w.aiData) return false;
@@ -17410,7 +17573,7 @@ Example:
                                    wordAnalysisOf === searchWithoutAt ||
                                    wordBaseForm === searchWithoutAt) return true;
 
-                            return aiDataIncludesSearchTerm(w.aiData, searchLower);
+                            return aiDataIncludesSearchTerm(w.aiData, searchLower, (w.__scCore instanceof Set) ? { core: w.__scCore, morph: w.__scMorph, phrase: w.__scPhrase } : null);
                         })
                     );
                 })();
@@ -18508,7 +18671,7 @@ CRITICAL — HOMOGRAPH DISAMBIGUATION: The user was shown multiple unrelated lex
                         wordBaseForm === searchWithAt ||
                         wordTerm === searchWithoutAt ||
                         wordBaseForm === searchWithoutAt) return true;
-                    return aiDataIncludesSearchTerm(w.aiData, searchLower);
+                    return aiDataIncludesSearchTerm(w.aiData, searchLower, (w.__scCore instanceof Set) ? { core: w.__scCore, morph: w.__scMorph, phrase: w.__scPhrase } : null);
                 })
                 || localWordsCache.find(w => {
                     if (!w || !w.aiData) return false;
@@ -18524,7 +18687,7 @@ CRITICAL — HOMOGRAPH DISAMBIGUATION: The user was shown multiple unrelated lex
                         wordTerm === searchWithoutAt ||
                         wordAnalysisOf === searchWithoutAt ||
                         wordBaseForm === searchWithoutAt) return true;
-                    return aiDataIncludesSearchTerm(w.aiData, searchLower);
+                    return aiDataIncludesSearchTerm(w.aiData, searchLower, (w.__scCore instanceof Set) ? { core: w.__scCore, morph: w.__scMorph, phrase: w.__scPhrase } : null);
                 })
             );
         }
@@ -19758,10 +19921,19 @@ CRITICAL — HOMOGRAPH DISAMBIGUATION: The user was shown multiple unrelated lex
         function getPrimaryCollocationAnchorCandidates(rawData) {
             try {
                 const source = (rawData && typeof rawData === 'object') ? rawData : {};
+                // BUGFIX: `searchedTerm` records the literal surface form the user typed
+                // (which may differ from the resolved headword — e.g. searching "så vidt"
+                // resolves to the headword "vidt", but searchedTerm stays "så vidt"). It is
+                // NOT part of this entry's own bare identity, so it must never be used for
+                // the "is this collocation just the headword repeated with nothing added"
+                // check below. Including it here caused a genuine, distinct collocation
+                // (e.g. "så vidt") to be silently rejected as a "bare repeat" whenever its
+                // phrase text happened to exactly match the previously-searched surface
+                // form, even though it is a completely valid standalone collocation. Only
+                // the entry's true headword identity fields belong here.
                 const rawCandidates = collectWordTermCandidates(
                     source.analysisOf,
                     source.baseForm,
-                    source.searchedTerm,
                     source.originalTerm
                 );
                 const out = [];
@@ -22335,43 +22507,9 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
                     if (!guide || !String(guide).trim()) gaps.push(`missing textual Persian pronunciation guide (تلفظ متنی) for "${term}"`);
                     if (!ipa || !String(ipa).trim()) gaps.push(`missing IPA pronunciation for "${term}"`);
                 }
-                // Build a normalized set of words from synonyms/antonyms ONLY.
-                // These two sections are purely reference chips — intentionally no
-                // pronunciation, no grammar tables, no example sentences. wordFamily
-                // is NOT included here because wordFamily nouns DO get their own
-                // grammar tables (those checks remain active for wordFamily items).
-                const referenceOnlyWordKeys = (() => {
-                    try {
-                        const refNorm = (s) => String(s || '').trim().toLowerCase()
-                            .replace(/^(en|et|at|to)\s+/, '')
-                            .replace(/[æøå]/g, (c) => ({ 'æ': 'ae', 'ø': 'oe', 'å': 'aa' }[c] || c))
-                            .replace(/[^a-z0-9]/g, '');
-                        const extractWord = (entry) => {
-                            const raw = String(entry || '').trim();
-                            if (!raw) return '';
-                            const colonIdx = raw.indexOf(':');
-                            return colonIdx >= 0 ? raw.slice(colonIdx + 1).trim() : raw;
-                        };
-                        const keys = new Set();
-                        const sources = [
-                            ...(Array.isArray(data.synonyms) ? data.synonyms : []),
-                            ...(Array.isArray(data.antonyms) ? data.antonyms : []),
-                        ];
-                        sources.forEach((entry) => {
-                            const w = extractWord(entry);
-                            const k = refNorm(w);
-                            if (k) keys.add(k);
-                        });
-                        return keys;
-                    } catch (e) { return new Set(); }
-                })();
                 try {
                     (Array.isArray(data.nounForms) ? data.nounForms : (data.nounForms ? [data.nounForms] : [])).forEach((item) => {
                         const w = String(item?.indefiniteSingular || '').trim();
-                        // Skip words that are only in synonyms/antonyms/wordFamily — those
-                        // sections are reference-only and never require pronunciation data.
-                        const wKey = w.toLowerCase().replace(/^(en|et)\s+/, '').replace(/[æøå]/g, (c) => ({ 'æ': 'ae', 'ø': 'oe', 'å': 'aa' }[c] || c)).replace(/[^a-z0-9]/g, '');
-                        if (wKey && referenceOnlyWordKeys.has(wKey)) return;
                         if (w && (!item?.pronunciation?.guide || !String(item.pronunciation.guide).trim())) {
                             gaps.push(`missing textual pronunciation for derived noun "${w}"`);
                         }
@@ -22385,10 +22523,6 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
                     (Array.isArray(data.nounForms) ? data.nounForms : (data.nounForms ? [data.nounForms] : [])).forEach((item) => {
                         const w = String(item?.indefiniteSingular || item?.word || '').trim();
                         if (!w) return;
-                        // Skip nouns that are reference-only (synonyms/antonyms/wordFamily) —
-                        // those sections never have grammar tables.
-                        const wKey = w.toLowerCase().replace(/^(en|et)\s+/, '').replace(/[æøå]/g, (c) => ({ 'æ': 'ae', 'ø': 'oe', 'å': 'aa' }[c] || c)).replace(/[^a-z0-9]/g, '');
-                        if (wKey && referenceOnlyWordKeys.has(wKey)) return;
                         // Some nouns (mass/abstract verbal nouns like "en skelnen") genuinely have
                         // no natural plural/definite-plural in real Danish. Those fields are marked
                         // via `notApplicableForms` (set by the main analysis or the targeted noun-form
@@ -22425,26 +22559,12 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
                             .map((item) => normKey(item?.indefiniteSingular || item?.word || ''))
                             .filter(Boolean)
                     );
-                    // Build a normalized set of antonyms/synonyms words so wordFamily nouns
-                    // that are merely antonyms/synonyms are not wrongly required to have a full
-                    // grammar table (they are reference-only chips, not derived-form entries).
-                    const antSynKeys = new Set();
-                    [...(Array.isArray(data.synonyms) ? data.synonyms : []), ...(Array.isArray(data.antonyms) ? data.antonyms : [])].forEach((entry) => {
-                        const raw = String(entry || '').trim();
-                        if (!raw) return;
-                        const colonIdx = raw.indexOf(':');
-                        const w = (colonIdx >= 0 ? raw.slice(colonIdx + 1) : raw).trim();
-                        if (w) antSynKeys.add(normKey(w));
-                    });
                     (Array.isArray(data.wordFamily) ? data.wordFamily : []).forEach((rawEntry) => {
                         const raw = String(rawEntry || '').trim();
                         if (!raw || !raw.includes(':')) return;
                         const parts = raw.split(':');
                         const word = parts[1] ? parts[1].trim() : '';
                         if (!word) return;
-                        // Skip if this word is also an antonym/synonym — those sections are
-                        // reference-only and intentionally have no grammar table.
-                        if (antSynKeys.has(normKey(word))) return;
                         const w = word.toLowerCase();
                         const looksLikeNoun = w.startsWith('en ') || w.startsWith('et ') ||
                             (!w.startsWith('at ') && !w.startsWith('to ') && !/\s/.test(w) &&
@@ -22459,10 +22579,6 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
                 try {
                     (Array.isArray(data.adjectiveForms) ? data.adjectiveForms : (data.adjectiveForms ? [data.adjectiveForms] : [])).forEach((item) => {
                         const w = String(item?.common || '').trim();
-                        // Skip adjectives that are reference-only (synonyms/antonyms/wordFamily) —
-                        // those sections are reference-only chips and never require pronunciation.
-                        const wKey = w.toLowerCase().replace(/[æøå]/g, (c) => ({ 'æ': 'ae', 'ø': 'oe', 'å': 'aa' }[c] || c)).replace(/[^a-z0-9]/g, '');
-                        if (wKey && referenceOnlyWordKeys.has(wKey)) return;
                         if (w && (!item?.pronunciation?.guide || !String(item.pronunciation.guide).trim())) {
                             gaps.push(`missing textual pronunciation for derived adjective "${w}"`);
                         }
@@ -22594,23 +22710,7 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
                     gaps.push(`missing a dedicated example sentence for "${missingTermText}"`);
                 });
 
-                // Final filter: remove any gap that mentions a reference-only word
-                // (antonym/synonym/wordFamily). These sections are purely reference chips
-                // and should never trigger pronunciation, table, or example-sentence gaps.
-                const allGaps = [...new Set(gaps.filter(Boolean))];
-                if (referenceOnlyWordKeys.size === 0) return allGaps;
-                return allGaps.filter((gap) => {
-                    // Extract the quoted word from the gap message (e.g. 'missing ... for "en uansvarlighed"')
-                    const m = gap.match(/"([^"]+)"/);
-                    if (!m) return true;
-                    const quotedWord = m[1].trim();
-                    const qKey = quotedWord.toLowerCase()
-                        .replace(/^(en|et|at|to)\s+/, '')
-                        .replace(/[æøå]/g, (c) => ({ 'æ': 'ae', 'ø': 'oe', 'å': 'aa' }[c] || c))
-                        .replace(/[^a-z0-9]/g, '');
-                    // Keep the gap only if the quoted word is NOT a reference-only word
-                    return !qKey || !referenceOnlyWordKeys.has(qKey);
-                });
+                return [...new Set(gaps.filter(Boolean))];
             } catch (e) {
                 return [];
             }
@@ -23137,10 +23237,114 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
             } catch (e) {}
         }
 
+        // BUGFIX: نامتقارنی nounForms/adjectiveForms در برابر
+        // derivedFormsAnalysis.foundNouns/foundAdjectives — توضیح کامل بالای نقطه‌ی
+        // فراخوانی در createWordDetailsHTML. این تابع دو کار می‌کند:
+        //   ۱) `data.derivedFormsAnalysis` را IN-PLACE کامل می‌کند تا همین رندر هم
+        //      آیتم‌های جامانده را نشان بدهد (بدون نیاز به رفرش/باز کردن دوباره‌ی مدال).
+        //   ۲) اگر کاربر لاگین است و در حالت نمایش (نه ویرایش) هستیم، همان تکمیل را
+        //      یک‌بار در پس‌زمینه روی Firestore هم می‌نویسد (fire-and-forget، با یک
+        //      dedup در حافظه‌ی همین session تا برای هر wordId بیش از یک‌بار تلاش
+        //      نکند و در صورت شکست نوشتن، دوباره امکان تلاش داشته باشد).
+        const __derivedAllowlistHealAttempted = new Set();
+        function healMissingDerivedFormsAllowlistEntries(data, wordData, mode) {
+            try {
+                if (!data || typeof data !== 'object') return;
+                const normKey = (s) => String(s || '').toLowerCase().replace(/^(en|et)\s+/, '').trim();
+
+                const nounWords = (Array.isArray(data.nounForms) ? data.nounForms : [])
+                    .map(n => String(n?.indefiniteSingular || n?.word || '').trim())
+                    .filter(Boolean);
+                const adjectiveWords = (Array.isArray(data.adjectiveForms) ? data.adjectiveForms : [])
+                    .map(a => String(a?.common || '').trim())
+                    .filter(Boolean);
+                if (nounWords.length === 0 && adjectiveWords.length === 0) return;
+
+                const dfa = (data.derivedFormsAnalysis && typeof data.derivedFormsAnalysis === 'object')
+                    ? data.derivedFormsAnalysis
+                    : null;
+                // اگر اصلاً allow-list ای وجود نداره، فیلتر پایین‌تر (که فقط وقتی
+                // __derivedNounKeySet/__derivedAdjKeySet غیر null باشه فعال می‌شه) از
+                // اول غیرفعاله و چیزی برای ترمیم نیست.
+                if (!dfa) return;
+
+                const existingFoundNouns = Array.isArray(dfa.foundNouns) ? dfa.foundNouns : [];
+                const existingFoundAdjectives = Array.isArray(dfa.foundAdjectives) ? dfa.foundAdjectives : [];
+                const foundNounKeys = new Set(existingFoundNouns.map(normKey));
+                const foundAdjectiveKeys = new Set(existingFoundAdjectives.map(normKey));
+
+                const missingNouns = nounWords.filter(w => w && !foundNounKeys.has(normKey(w)));
+                const missingAdjectives = adjectiveWords.filter(w => w && !foundAdjectiveKeys.has(normKey(w)));
+                if (missingNouns.length === 0 && missingAdjectives.length === 0) return;
+
+                // (۱) ترمیم فوری در حافظه، برای همین رندر — data همون آبجکتیه که چند
+                // خط پایین‌تر برای ساخت جدول‌های صرف استفاده می‌شه، پس این تغییر باید
+                // قبل از اون نقطه اعمال شده باشه (که هست، چون این تابع همون اول صدا
+                // زده می‌شه).
+                data.derivedFormsAnalysis = {
+                    ...dfa,
+                    foundNouns: missingNouns.length > 0 ? [...new Set([...existingFoundNouns, ...missingNouns])] : existingFoundNouns,
+                    foundAdjectives: missingAdjectives.length > 0 ? [...new Set([...existingFoundAdjectives, ...missingAdjectives])] : existingFoundAdjectives
+                };
+
+                // (۲) ترمیم پایدار در پس‌زمینه روی Firestore — فقط در حالت نمایش
+                // (نه ویرایش، چون اونجا خودِ saveWordChanges مسئول ذخیره‌ست) و فقط
+                // وقتی کاربر و id کلمه در دسترسه.
+                const wordId = wordData?.id;
+                if (mode !== 'view' || !wordId || !currentUser || typeof updateDoc !== 'function' || typeof doc !== 'function' || typeof db === 'undefined') {
+                    return;
+                }
+                if (__derivedAllowlistHealAttempted.has(wordId)) return;
+                __derivedAllowlistHealAttempted.add(wordId);
+
+                const wordRef = doc(db, 'users', currentUser.uid, getWordsCollectionName(), wordId);
+                updateDoc(wordRef, {
+                    'aiData.derivedFormsAnalysis.foundNouns': data.derivedFormsAnalysis.foundNouns,
+                    'aiData.derivedFormsAnalysis.foundAdjectives': data.derivedFormsAnalysis.foundAdjectives
+                }).then(() => {
+                    // کش محلی رو هم هماهنگ کن تا رندرهای بعدی همین session نیازی به
+                    // این ترمیم دوباره نداشته باشن.
+                    try {
+                        const cached = (typeof localWordsCache !== 'undefined' ? localWordsCache : []).find(w => w.id === wordId);
+                        if (cached?.aiData) {
+                            cached.aiData.derivedFormsAnalysis = {
+                                ...(cached.aiData.derivedFormsAnalysis && typeof cached.aiData.derivedFormsAnalysis === 'object' ? cached.aiData.derivedFormsAnalysis : {}),
+                                foundNouns: data.derivedFormsAnalysis.foundNouns,
+                                foundAdjectives: data.derivedFormsAnalysis.foundAdjectives
+                            };
+                        }
+                    } catch (e) {}
+                }).catch((e) => {
+                    // اگه نوشتن شکست خورد (مثلاً آفلاین)، اجازه بده دفعه‌ی بعد دوباره
+                    // امتحان کنه.
+                    __derivedAllowlistHealAttempted.delete(wordId);
+                    console.error('healMissingDerivedFormsAllowlistEntries: failed to persist fix for', wordId, e);
+                });
+            } catch (e) {}
+        }
+
         function createWordDetailsHTML(wordData, mode = 'view') {
             try {
                 const data = normalizeWordAiData(wordData?.aiData, wordData?.originalTerm || '');
                 if (!data) return '<p>اطلاعات این واژه کامل نیست.</p>';
+
+                // BUGFIX (خودترمیمی نامتقارنی nounForms/adjectiveForms در برابر
+                // derivedFormsAnalysis.foundNouns/foundAdjectives):
+                // رندر جدول‌های صرف در پایین همین تابع، هر آیتم nounForms/adjectiveForms
+                // را با allow-list ای به اسم derivedFormsAnalysis.foundNouns/foundAdjectives
+                // کراس-چک می‌کند و هر آیتمی که در آن allow-list نباشد را بی‌سروصدا از
+                // نمایش حذف می‌کند (نگاه کنید به __derivedNounKeySet/__derivedAdjKeySet
+                // پایین‌تر). این allow-list توسط خودِ AI ساخته می‌شود و گاهی برای یک
+                // مشتق خاص ناقص می‌ماند (مثال واقعی: "en flertalsbeslutning" داخل
+                // nounForms کلمه‌ی "flertal" بود اما در foundNouns نبود، پس مدال آن را
+                // نشان نمی‌داد با اینکه کاملاً در دیتا موجود بود).
+                // مدال ویرایش (saveWordChanges) از قبل این ناهماهنگی را موقع ذخیره‌ی
+                // دستی ترمیم می‌کند؛ اینجا همان کار را خودکار و در لحظه‌ی رندر انجام
+                // می‌دهیم: (۱) در حافظه allow-list را برای همین رندر تکمیل می‌کنیم تا
+                // آیتم پنهان همین الان نمایش داده شود، و (۲) در پس‌زمینه همان تکمیل را
+                // در Firestore هم ذخیره می‌کنیم تا بارهای بعدی هم نیازی به این ترمیم
+                // نداشته باشند.
+                healMissingDerivedFormsAllowlistEntries(data, wordData, mode);
 
             // Check if word needs update (outdated prompt version)
             const pVersion = String(wordData.promptVersion || wordData.aiData?.promptVersion || '').trim();
@@ -23334,11 +23538,30 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
                 // عبارتی باشد (مثلاً "ser frem til" به‌جای مصدر کامل "at se frem til")
                 // و جایگزینی آن، عنوان مدال را از حالت مصدری/کامل خارج می‌کند.
                 const hasValidPhrasalVerbInfinitiveRoot = preferVerbRootResolution && __isVerbLikeInfinitive(rootTerm);
+                // BUGFIX: the verb-only guard above never protected non-verb entries
+                // (nouns/adjectives/adverbs) that already have their own solid,
+                // independent root identity (e.g. "vidt", analysisOf="vidt"). Previously,
+                // if this same word's `collocations` happened to contain an entry whose
+                // phrase text exactly equals the (persisted, possibly stale)
+                // `data.searchedTerm` — e.g. the collocation "så vidt" living under the
+                // headword "vidt" — hasMeaningfulExactCollocationForPhrase() alone was
+                // enough to hijack the ENTIRE modal's title into that multi-word
+                // collocation phrase, even though the word's real identity is the single
+                // word "vidt" with its own noun/adjective declension tables. Because the
+                // declension tables further below key off this same title variable
+                // (rootAdjKey/rootNounKey/rootVerbKey = normalize(displayTerm)), that also
+                // silently broke those tables (no matching root form found -> a bogus
+                // synthetic row using the hijacked phrase text got fabricated instead).
+                // Mirror the verb guard's intent for every word class: only let a
+                // collocation-phrase match override the title when this entry does NOT
+                // already have its own solid, non-verb root identity.
+                const hasEstablishedNonVerbRoot = !!rootTerm && !preferVerbRootResolution;
                 const shouldPreferExactSearchedTitle =
                     !!searchedTermRaw &&
                     searchedWordCount > 1 &&
                     !isCanonicalSeparableSearchedVariant &&
                     !hasValidPhrasalVerbInfinitiveRoot &&
+                    !hasEstablishedNonVerbRoot &&
                     (
                         !!searchedPattern ||
                         hasMeaningfulExactCollocationForPhrase(data, searchedTermRaw) ||
@@ -23832,7 +24055,13 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
 					};
 
 					const normalizeNounKey = (v) => normalizeLookupNoun(v);
-					const rootNounKey = normalizeNounKey(displayTerm);
+					// BUGFIX: use the true resolved root (rootTerm), never the display-only
+					// `displayTerm` — displayTerm can legitimately be swapped to a full
+					// multi-word searched phrase for title purposes (see
+					// shouldPreferExactSearchedTitle above), and keying the noun-forms
+					// root lookup off that text instead of the real root silently fails to
+					// match any real nounForms entry, fabricating a bogus synthetic row.
+					const rootNounKey = normalizeNounKey(rootTerm || displayTerm);
 					const isRootNoun = rootPartOfSpeech === 'اسم';
 					let isNounLikeRoot = isRootNoun;
 					try {
@@ -24304,7 +24533,9 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
 				})();
 
 				const normalizeVerbKey = (v) => normalizeLookup(v);
-				const rootVerbKey = normalizeVerbKey(displayTerm);
+				// BUGFIX: same reasoning as rootNounKey above — use the true resolved
+				// root (rootTerm), not the display-only `displayTerm`.
+				const rootVerbKey = normalizeVerbKey(rootTerm || displayTerm);
 				const isRootVerb = rootPartOfSpeech === 'فعل';
                 const hasRealVerbForms = (entry) => {
                     if (!entry || typeof entry !== 'object') return false;
@@ -24664,7 +24895,9 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
                 }
 
                 if (adjArray.length === 0 && rootPartOfSpeech === 'قید') {
-                    const dt = String(displayTerm || '').trim();
+                    // BUGFIX: prefer the true resolved root over the display-only title text
+                    // (see rootAdjKey fix above for why displayTerm alone is unsafe here).
+                    const dt = String(rootTerm || displayTerm || '').trim();
                     if (dt) adjArray = [{ common: dt, meaning: '' }];
                 }
 
@@ -24676,7 +24909,13 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
                 if (adjArray.length > 0) {
                     const normalizeLookupAdj = (s) => String(s || '').toLowerCase().replace(/^(at|en|et)\s+/, '').trim();
 					const normalizeAdjKey = (v) => String(v || '').toLowerCase().trim();
-					const rootAdjKey = normalizeAdjKey(displayTerm);
+					// BUGFIX: same reasoning as rootNounKey/rootVerbKey above — use the true
+					// resolved root (rootTerm), not the display-only `displayTerm`. This is
+					// the exact cause of the broken "så vidt" row that used to appear in
+					// the derived-adjective table: rootAdjKey was built from a hijacked
+					// display title, found no match in adjectiveForms, and fell back to a
+					// synthetic { common: displayTerm } row.
+					const rootAdjKey = normalizeAdjKey(rootTerm || displayTerm);
 					const __derivedSets = (() => {
 						try {
 							const d = data.derivedFormsAnalysis;
@@ -25261,97 +25500,23 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
                     }
                 })
                 : [];
-            // Also surface any phrase entries stored as STANDALONE word-entries in the
-            // local cache whose originalTerm contains this word (displayTerm) as a space-
-            // delimited component. Real case: searching "vidt" shows the modal for that
-            // word, but "så vidt" is a separate DB entry — it should still appear in the
-            // عبارات رایج section so the user can navigate to it from here.
-            // Each entry is stored as an object { phrase, meaning, wordId, wordTerm }
-            // so the popup can use the phrase's OWN word-id for "افزودن به مشتق‌ها".
-            const cacheBasedCollocations = (() => {
-                try {
-                    const displayTermLower = normalizeText(displayTerm);
-                    if (!displayTermLower || !localWordsCache) return [];
-                    const existingPhraseKeys = new Set(
-                        filteredCollocations.map((item) => {
-                            try { return normalizeText(String(parseCollocationEntry(item).phrase || '').trim()); } catch (e) { return ''; }
-                        }).filter(Boolean)
-                    );
-                    const cacheEntries = Array.isArray(localWordsCache) ? localWordsCache : [];
-                    const result = [];
-                    cacheEntries.forEach((cacheWord) => {
-                        try {
-                            if (cacheWord.id === wordData?.id) return;
-                            
-                            // 1. Check if the word itself is a standalone phrase containing our displayTerm
-                            const rawTerm = String(cacheWord?.originalTerm || cacheWord?.aiData?.searchedTerm || '').trim();
-                            if (rawTerm && rawTerm.includes(' ')) {
-                                const termNorm = normalizeText(rawTerm);
-                                const tokens = termNorm.split(' ').filter(Boolean);
-                                if (tokens.includes(displayTermLower) && !existingPhraseKeys.has(termNorm) && !hiddenCollocationKeys.has(termNorm) && !isCollocationCoveredByVisiblePrepositionTables(rawTerm)) {
-                                    const meaning = String(cacheWord?.aiData?.derivedWordMeaning || cacheWord?.aiData?.translation || '').trim();
-                                    existingPhraseKeys.add(termNorm);
-                                    result.push({ phrase: rawTerm, meaning, wordId: String(cacheWord?.id || '').trim(), wordTerm: rawTerm });
-                                }
-                            }
-                            
-                            // 2. Check if this other word's collocations contain our displayTerm
-                            if (Array.isArray(cacheWord?.aiData?.collocations)) {
-                                cacheWord.aiData.collocations.forEach((colRaw) => {
-                                    try {
-                                        const parsed = parseCollocationEntry(colRaw);
-                                        const phrase = String(parsed.phrase || '').trim();
-                                        if (!phrase || !phrase.includes(' ')) return;
-                                        
-                                        const phraseNorm = normalizeText(phrase);
-                                        const tokens = phraseNorm.split(' ').filter(Boolean);
-                                        if (!tokens.includes(displayTermLower)) return;
-                                        
-                                        if (existingPhraseKeys.has(phraseNorm) || hiddenCollocationKeys.has(phraseNorm) || isCollocationCoveredByVisiblePrepositionTables(phrase)) return;
-                                        
-                                        existingPhraseKeys.add(phraseNorm);
-                                        result.push({
-                                            phrase: phrase,
-                                            meaning: String(parsed.meaning || '').trim(),
-                                            wordId: String(cacheWord.id || '').trim(),
-                                            wordTerm: String(cacheWord.originalTerm || '').trim()
-                                        });
-                                    } catch (e) {}
-                                });
-                            }
-                        } catch (e) {}
-                    });
-                    return result;
-                } catch (e) { return []; }
-            })();
             const collocationsTitle = '⭐ عبارات رایج:';
-            const renderCollocationItem = (displayPhrase, translation, wId, wTerm, idx, isExistingEntry = false) => {
-                return `<li class="clickable-term collocation-phrase-item cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 p-2 rounded transition" style="list-style:none;" data-term="${escapeHtml(displayPhrase)}" data-index="${idx}" data-word-id="${escapeHtml(wId || '')}" data-word-term="${escapeHtml(wTerm || '')}" data-phrase="${escapeHtml(displayPhrase)}" data-meaning="${escapeHtml(translation)}"${isExistingEntry ? ' data-is-existing-entry="1"' : ''}>
-                            <div style="line-height:1.4; direction:ltr; width:100%; text-align:right;">
-                                <span class="font-semibold" dir="ltr" style="float:left; white-space:nowrap; margin-right:0.75rem;">${escapeHtml(displayPhrase)}</span>
-                                ${translation ? `<span class="text-gray-600 dark:text-gray-400 text-sm" dir="rtl" style="overflow-wrap:anywhere; word-break:break-word;">${escapeHtml(translation)}</span>` : ''}
-                                <span style="display:block; clear:both; height:0; line-height:0;"></span>
-                            </div>
-                        </li>`;
-            };
-            const allCollocationItems = [
-                ...filteredCollocations.map((col, idx) => {
-                    const parsed = parseCollocationEntry(col);
-                    const phrase = String(parsed.phrase || '').trim();
-                    const displayPhrase = normalizeLexicalDisplayTerm(phrase) || phrase;
-                    const translation = String(parsed.meaning || '').trim();
-                    if (!displayPhrase) return '';
-                    return renderCollocationItem(displayPhrase, translation, wordData.id || '', wordData.originalTerm || '', idx, false);
-                }),
-                ...cacheBasedCollocations.map((entry, i) => {
-                    const displayPhrase = normalizeLexicalDisplayTerm(entry.phrase) || entry.phrase;
-                    if (!displayPhrase) return '';
-                    return renderCollocationItem(displayPhrase, entry.meaning, entry.wordId, entry.wordTerm, filteredCollocations.length + i, true);
-                })
-            ].filter(Boolean);
-            const collocationsHtml = (allCollocationItems.length > 0)
+            const collocationsHtml = (filteredCollocations.length > 0)
                 ? `<h3 class="font-bold mt-4 text-content-rtl">${collocationsTitle}</h3>
-                   <ul class="space-y-1 list-none pr-0" style="list-style:none; padding-inline-start:0; margin:0;">${allCollocationItems.join('')}</ul>`
+                   <ul class="space-y-1 list-none pr-0" style="list-style:none; padding-inline-start:0; margin:0;">${filteredCollocations.map((col, idx) => {
+                        const parsed = parseCollocationEntry(col);
+                        const phrase = String(parsed.phrase || '').trim();
+                        const displayPhrase = normalizeLexicalDisplayTerm(phrase) || phrase;
+                        const translation = String(parsed.meaning || '').trim();
+                        if (!displayPhrase) return '';
+                        return `<li class="clickable-term collocation-phrase-item cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 p-2 rounded transition" style="list-style:none;" data-term="${escapeHtml(displayPhrase)}" data-index="${idx}" data-word-id="${escapeHtml(wordData.id || '')}" data-word-term="${escapeHtml(wordData.originalTerm || '')}" data-phrase="${escapeHtml(displayPhrase)}" data-meaning="${escapeHtml(translation)}">
+                                    <div style="line-height:1.4; direction:ltr; width:100%; text-align:right;">
+                                        <span class="font-semibold" dir="ltr" style="float:left; white-space:nowrap; margin-right:0.75rem;">${escapeHtml(displayPhrase)}</span>
+                                        ${translation ? `<span class="text-gray-600 dark:text-gray-400 text-sm" dir="rtl" style="overflow-wrap:anywhere; word-break:break-word;">${escapeHtml(translation)}</span>` : ''}
+                                        <span style="display:block; clear:both; height:0; line-height:0;"></span>
+                                    </div>
+                                </li>`;
+                   }).filter(Boolean).join('')}</ul>`
                 : '';
 
             const synonymsHtml = (data.synonyms && data.synonyms.length > 0) ? `<h3 class="font-bold mt-4 text-content-rtl">مترادف‌ها:</h3><div class="flex flex-wrap gap-2 justify-end" dir="rtl">${data.synonyms.map((syn, idx) => {
@@ -25732,7 +25897,14 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
 			return out;
 		}
 
-		function aiDataIncludesSearchTerm(aiData, searchedTerm) {
+		// 🚀 MEMORY/SPEED FIX (مرحله ۱۰-ب): پارامتر سوم اختیاریه — اگه صدازننده از قبل
+		// ایندکس‌های محاسبه‌شده‌ی یک کلمه (word.__scCore/__scMorph/__scPhrase، ساخته‌شده
+		// توسط buildWordDerivedIndexes) رو داشته باشه، به‌جاش پاس میده و این تابع دیگه
+		// نیازی به پیمایش زنده‌ی nounForms/verbConjugations/adjectiveForms/collocations/
+		// examples نداره. اگه پاس داده نشه (مثلاً برای یک سند تازه‌fetch‌شده از سرور که
+		// هنوز ایندکسش ساخته نشده)، دقیقاً همون مسیر قدیمیِ پیمایش زنده اجرا می‌شه —
+		// یعنی نتیجه‌ی matching در هر دو مسیر کاملاً یکسانه، فقط منبعِ candidates فرق داره.
+		function aiDataIncludesSearchTerm(aiData, searchedTerm, cachedSets = null) {
 			try {
 				if (!aiData || typeof aiData !== 'object') return false;
 				const isPhraseQuery = (() => {
@@ -25791,25 +25963,40 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
 					}
 				};
 
-				// Root/base fields
-				add(aiData.analysisOf);
-				add(aiData.baseForm);
-				if (isPhraseQuery) {
-					add(aiData.searchedTerm);
-					addDeep(aiData.collocations);
-					addDeep(aiData.examples);
-				}
-				for (const v of variants) {
-					if (candidates.has(v)) return true;
-				}
+				if (cachedSets && cachedSets.core instanceof Set && cachedSets.morph instanceof Set) {
+					// 🚀 مسیر سریع: از ایندکس از پیش‌ساخته استفاده کن، نه پیمایش زنده
+					for (const c of cachedSets.core) candidates.add(c);
+					if (isPhraseQuery && cachedSets.phrase instanceof Set) {
+						for (const c of cachedSets.phrase) candidates.add(c);
+					}
+					for (const v of variants) {
+						if (candidates.has(v)) return true;
+					}
+					for (const c of cachedSets.morph) candidates.add(c);
+					for (const v of variants) {
+						if (candidates.has(v)) return true;
+					}
+				} else {
+					// مسیر قدیمی (fallback) — برای aiData بدون ایندکس از پیش‌ساخته
+					add(aiData.analysisOf);
+					add(aiData.baseForm);
+					if (isPhraseQuery) {
+						add(aiData.searchedTerm);
+						addDeep(aiData.collocations);
+						addDeep(aiData.examples);
+					}
+					for (const v of variants) {
+						if (candidates.has(v)) return true;
+					}
 
-				// Only scan displayed morphology tables (do NOT accept derivedFormsAnalysis alone)
-				addDeep(aiData.nounForms);
-				addDeep(aiData.verbConjugations);
-				addDeep(aiData.adjectiveForms);
+					// Only scan displayed morphology tables (do NOT accept derivedFormsAnalysis alone)
+					addDeep(aiData.nounForms);
+					addDeep(aiData.verbConjugations);
+					addDeep(aiData.adjectiveForms);
 
-				for (const v of variants) {
-					if (candidates.has(v)) return true;
+					for (const v of variants) {
+						if (candidates.has(v)) return true;
+					}
 				}
 
 				// 🔧 FUZZY FALLBACK — real bug this fixes: a user types a real Danish word
@@ -25881,9 +26068,11 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
 					if (targetVariants.has(v)) return w;
 				}
 
+				// 🚀 مرحله ۱۰-ب: اگه ایندکس از پیش‌ساخته‌ی این کلمه آماده‌ست، به aiDataIncludesSearchTerm پاسش بده
+				const cachedSets = (w.__scCore instanceof Set) ? { core: w.__scCore, morph: w.__scMorph, phrase: w.__scPhrase } : null;
 				// Add check for inflected forms
 				for (const v of targetVariants) {
-					if (aiDataIncludesSearchTerm(w.aiData, v)) return w;
+					if (aiDataIncludesSearchTerm(w.aiData, v, cachedSets)) return w;
 				}
 			}
 			return null;
@@ -26127,6 +26316,7 @@ Example:
 					const stripped = stripDanishInfinitive(localWord.originalTerm);
 					wordSearchIndex.set(normalizeText(stripped), localWord);
 				}
+				try { buildWordDerivedIndexes(localWord); } catch (e) {}
 				if (localWord.aiData?.translation) {
 					const normTrans = normalizeText(localWord.aiData.translation);
 					if (!translationIndex.has(normTrans)) translationIndex.set(normTrans, localWord);
@@ -26530,7 +26720,7 @@ Example:
                 if (globalWordDoc.exists()) {
                     const byIdWord = toGlobalWordObject(globalWordDoc.data() || {}, normalizedTerm);
                     if (byIdWord) {
-                        if (cacheKey) globalWordRecordCache.set(cacheKey, byIdWord);
+                        if (cacheKey) globalWordRecordCacheSet(cacheKey, byIdWord);
                         return byIdWord;
                     }
                 }
@@ -26557,7 +26747,7 @@ Example:
                             const raw = qSnap.docs[0].data() || {};
                             const byPrefixWord = toGlobalWordObject(raw, normalizedTerm);
                             if (byPrefixWord && doesGlobalWordRecordMatchAnyTerm(byPrefixWord, [normalizedTerm])) {
-                                if (cacheKey) globalWordRecordCache.set(cacheKey, byPrefixWord);
+                                if (cacheKey) globalWordRecordCacheSet(cacheKey, byPrefixWord);
                                 return byPrefixWord;
                             }
                         }
@@ -26741,6 +26931,40 @@ Example:
             };
         }
 
+        // BUGFIX: وقتی preflight (بررسی چندریشه‌ای بودن) همین لحظه برای این جستجو
+        // «تک‌ریشه‌ست» را تأیید کرده، اما کلمه از دیتابیس جامع (global_words_*) آمده
+        // نه از تولید تازه‌ی AI — تا امروز این تأییدیه هیچ‌وقت روی aiData ست نمی‌شد
+        // (attachHomographChoiceIfPending فقط در مسیر تولید تازه صدا زده می‌شد، نه در
+        // openGlobalWordModal)، پس isSingleRoot/userSelectedRoot خالی می‌موند و
+        // findWordDataCompletenessGaps این کلمه را همیشه «ناقص» گزارش می‌داد — با اینکه
+        // بررسی واقعاً و درست انجام شده بود. این تابع همان stamp را روی رکورد جامع هم
+        // ماندگار می‌کند تا بار بعدی که هر کاربری (نه فقط همین کاربر) این کلمه را از
+        // بانک جامع باز کند، دوباره به همین مشکل برنخورد — دقیقاً همان همگام‌سازیِ
+        // دوطرفه‌ای که بین بانک شخصی و بانک جامع برای بقیه‌ی فیلدها همیشه برقرار است.
+        async function persistGlobalWordRootConfirmation(globalWord) {
+            try {
+                const canonicalTerm = String(globalWord?.originalTerm || '').trim();
+                if (!canonicalTerm || !globalWord?.aiData) return;
+                const fieldsToPersist = {};
+                if (globalWord.aiData.isSingleRoot === true) {
+                    fieldsToPersist['aiData.isSingleRoot'] = true;
+                }
+                if (globalWord.aiData.userSelectedRoot) {
+                    fieldsToPersist['aiData.userSelectedRoot'] = globalWord.aiData.userSelectedRoot;
+                }
+                if (Object.keys(fieldsToPersist).length === 0) return;
+                const globalCollectionName = `global_words_${learningLanguage.toLowerCase()}`;
+                const safeDocId = buildGlobalWordDocId(canonicalTerm);
+                const globalWordRef = doc(db, globalCollectionName, safeDocId);
+                await updateDoc(globalWordRef, fieldsToPersist);
+            } catch (e) {
+                // اگر سند جامع با همین docId پیدا نشد (مثلاً رکورد از طریق searchPrefixes
+                // با یک id متفاوت پیدا شده بود)، بی‌سروصدا نادیده بگیر — این فقط یک
+                // خودترمیمی جانبیه، نمایش کلمه به کاربر به آن وابسته نیست.
+                console.error('persistGlobalWordRootConfirmation: failed to persist for', globalWord?.originalTerm, e);
+            }
+        }
+
         async function openGlobalWordModal(term, searchedTerm = null) {
             const safeTerm = String(term || '').trim();
             if (!safeTerm) return false;
@@ -26765,6 +26989,23 @@ Example:
                 showToast('⚠️ اطلاعات ذخیره‌شده این واژه پیدا نشد');
                 return false;
             }
+
+            // BUGFIX: مصرف کردنِ تأییدیه‌ی preflight («تک‌ریشه‌ست») روی این کلمه، دقیقاً
+            // مثل مسیر تولید تازه‌ی AI (نگاه کنید به attachHomographChoiceIfPending و
+            // persistGlobalWordRootConfirmation بالاتر). بدون این، هر کلمه‌ای که از
+            // بانک جامع می‌آمد برای همیشه با «نقص تأیید ریشه» نمایش داده می‌شد، حتی اگر
+            // preflight همین حالا واقعاً و درست اجرا شده باشد.
+            try {
+                if (globalWord.aiData) {
+                    const hadRootConfirmation = globalWord.aiData.isSingleRoot === true || !!globalWord.aiData.userSelectedRoot;
+                    const rootCheckTerm = String(searchedTerm || safeTerm).trim();
+                    attachHomographChoiceIfPending(rootCheckTerm, globalWord.aiData);
+                    const nowHasRootConfirmation = globalWord.aiData.isSingleRoot === true || !!globalWord.aiData.userSelectedRoot;
+                    if (!hadRootConfirmation && nowHasRootConfirmation) {
+                        persistGlobalWordRootConfirmation(globalWord).catch(() => {});
+                    }
+                }
+            } catch (e) {}
 
             const recentTerm = String(searchedTerm || safeTerm).trim();
             if (recentTerm) {
@@ -26959,6 +27200,7 @@ Example:
                                     const stripped = stripDanishInfinitive(updated.originalTerm);
                                     wordSearchIndex.set(normalizeText(stripped), updated);
                                 }
+                                try { buildWordDerivedIndexes(updated); } catch (e) {}
                                 const prevTrans = prev?.aiData?.translation;
                                 const nextTrans = updated?.aiData?.translation;
                                 if (prevTrans !== nextTrans) {
@@ -27065,6 +27307,7 @@ Example:
                                 const stripped = stripDanishInfinitive(localWord.originalTerm);
                                 wordSearchIndex.set(normalizeText(stripped), localWord);
                             }
+                            try { buildWordDerivedIndexes(localWord); } catch (e) {}
                             if (localWord.aiData?.translation) {
                                 const normTrans = normalizeText(localWord.aiData.translation);
                                 if (!translationIndex.has(normTrans)) translationIndex.set(normTrans, localWord);
@@ -35161,8 +35404,6 @@ Example:
 
                 document.getElementById('phrase-flashcard-popup')?.remove();
 
-                const isExisting = item.hasAttribute('data-is-existing-entry');
-
                 const overlay = document.createElement('div');
                 overlay.id = 'phrase-flashcard-popup';
                 // z-index هم با کلاس و هم با style ست می‌شود (دقیقاً مثل الگوی
@@ -35179,7 +35420,7 @@ Example:
                                 افزودن به مشتق‌ها
                             </button>
                             <button id="phrase-new-entry-btn" class="w-full bg-green-600 text-white p-3 rounded-lg font-bold hover:bg-green-700 transition-all active:scale-95" style="background-color:#16a34a;">
-                                ${isExisting ? 'باز کردن مدخل' : 'ساخت مدخل جدید'}
+                                ساخت مدخل جدید
                             </button>
                             <button id="phrase-flashcard-cancel-btn" class="w-full bg-gray-500 text-white p-3 rounded-lg font-bold hover:bg-gray-600 transition-all active:scale-95" style="background-color:#6b7280;">انصراف</button>
                         </div>
@@ -35672,6 +35913,72 @@ Example:
             bindDerivedFormAiAddButton('adj', 'adjectiveForms');
             bindDerivedFormAiAddButton('noun', 'nounForms');
             bindPrepositionAiAddButton();
+            bindExplanationAiUpdateButton();
+        }
+
+        // دکمه‌ی «بروزرسانی توضیحات با AI»: وقتی توضیحات موجود اشتباه است — مثلاً به‌جای
+        // توضیح خودِ ریشه، توضیح مربوط به یک مشتق (صفت/اسم مشتق‌شده) را داده — کاربر با یک
+        // کلیک فقط همین یک فیلد را بازنویسی می‌کند، بدون اینکه لازم باشد کل مدال (که شامل
+        // چند تماس سنگین دیگر به AI است) دوباره ساخته شود. متن فعلیِ باکس (هرچه کاربر تا
+        // این لحظه در تکست‌باکس نوشته/ویرایش کرده) به‌عنوان توضیحِ «اشتباه فعلی» به AI داده
+        // می‌شود تا دقیقاً بداند چه چیزی را اصلاح کند؛ نتیجه مستقیماً در همان تکست‌باکس
+        // جایگزین می‌شود و کاربر باید طبق روال معمول دکمه‌ی ذخیره‌ی مدال را بزند.
+        function bindExplanationAiUpdateButton() {
+            const textarea = modalContent.querySelector('#edit-explanation');
+            const btn = modalContent.querySelector('#edit-explanation-ai-btn');
+            const status = modalContent.querySelector('#edit-explanation-ai-status');
+            if (!textarea || !btn) return;
+
+            const setStatus = (msg, isError) => {
+                if (!status) return;
+                if (!msg) { status.classList.add('hidden'); status.textContent = ''; return; }
+                status.classList.remove('hidden');
+                status.textContent = msg;
+                status.classList.toggle('text-red-500', !!isError);
+                status.classList.toggle('dark:text-red-400', !!isError);
+                status.classList.toggle('text-gray-500', !isError);
+                status.classList.toggle('dark:text-gray-400', !isError);
+            };
+
+            const doUpdate = async () => {
+                const rootTerm = modalContent.querySelector('#edit-originalTerm')?.value.trim() || '';
+                const rootPos = modalContent.querySelector('#edit-partOfSpeech')?.value.trim() || '';
+                const currentExplanation = textarea.value.trim();
+
+                const originalBtnHtml = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i>';
+                setStatus('در حال دریافت توضیحات جدید از هوش مصنوعی...', false);
+
+                try {
+                    const prompt = `You are an expert linguist helping a Persian-speaking learner. The dictionary entry's headword (base/root form) is "${rootTerm}"${rootPos ? ` (part of speech: ${rootPos})` : ''}.
+
+The current "explanation" field for this entry is either wrong, unclear, or actually describes a DIFFERENT derived word (e.g. a derived adjective/noun/participle) instead of explaining the root "${rootTerm}" itself:
+Current (flagged as wrong/unclear) explanation: ${JSON.stringify(currentExplanation || '(خالی)')}
+
+Rewrite it from scratch as 1-2 short Persian sentences that explain ONLY the core meaning and most common use of "${rootTerm}" itself (the base/root form), with impersonal wording like "این فعل..."/"این اسم..."/"این صفت...". Do NOT describe a different derived/related word, do NOT mention grammatical relationships to other forms, and do NOT teach grammar/conjugation/plural/gender.
+
+Respond with ONLY a JSON object (no other text, no markdown fences):
+{"explanation": "متن فارسی جدید"}`;
+
+                    const response = await callGeminiAPI(
+                        { temperature: 0.3, response_mime_type: "application/json" },
+                        [{ role: "user", parts: [{ text: prompt }] }],
+                        { source: 'user' }
+                    );
+                    const newExplanation = String(response?.explanation || '').trim();
+                    if (!newExplanation) throw new Error('پاسخ هوش مصنوعی خالی بود');
+
+                    textarea.value = newExplanation;
+                    setStatus('بروزرسانی شد ✓', false);
+                } catch (e) {
+                    setStatus('خطا: ' + (e?.message || 'دریافت توضیحات جدید ناموفق بود'), true);
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = originalBtnHtml;
+                }
+            };
+            btn.onclick = doUpdate;
         }
 
         // Reads the current root-word context straight from the edit-modal's own form
@@ -36121,7 +36428,12 @@ Every field must be filled with real linguistic data (never a placeholder, never
                     <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-xl border border-gray-200 dark:border-gray-600">
                         ${sectionHeader('توضیحات و نکات')}
                         <div class="space-y-3">
-                            <div><label class="block font-bold mb-1 text-xs text-right">توضیحات</label><textarea id="edit-explanation" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 h-20 text-content-rtl focus:ring-2 focus:ring-blue-500">${editExplanation}</textarea></div>
+                            <div>
+                                <label class="block font-bold mb-1 text-xs text-right">توضیحات</label>
+                                <textarea id="edit-explanation" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 h-20 text-content-rtl focus:ring-2 focus:ring-blue-500">${editExplanation}</textarea>
+                                <button type="button" id="edit-explanation-ai-btn" class="mt-1.5 w-full bg-blue-500 text-white rounded-lg text-xs font-bold hover:bg-blue-600 py-1.5" title="بازنویسی فقط همین بخش با هوش مصنوعی، بدون بروزرسانی کل مدال"><i class="fa fa-magic"></i> بروزرسانی توضیحات با AI</button>
+                                <div id="edit-explanation-ai-status" class="text-xs text-gray-500 dark:text-gray-400 mt-1 text-right hidden"></div>
+                            </div>
                             <div><label class="block font-bold mb-1 text-xs text-right">نکات گرامری (غیر از حروف اضافه)</label><textarea id="edit-grammarNotes" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 h-20 text-content-rtl focus:ring-2 focus:ring-blue-500">${editGrammarNotesRestText}</textarea></div>
                             <div><label class="block font-bold mb-1 text-xs text-right">اشتباهات رایج</label><textarea id="edit-commonMistakes" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 h-16 text-content-rtl focus:ring-2 focus:ring-blue-500">${editCommonMistakes}</textarea></div>
                             <div><label class="block font-bold mb-1 text-xs text-right">زمینه فرهنگی</label><textarea id="edit-culturalContext" class="w-full p-2 bg-white dark:bg-gray-700 rounded-lg border dark:border-gray-600 h-16 text-content-rtl focus:ring-2 focus:ring-blue-500">${editCulturalContext}</textarea></div>
@@ -39681,11 +39993,18 @@ Return a JSON object: {
                     }
                     if (!queryHasPersian) {
                         consider(word, word.aiData.derivedWordMeaning, 1);
-                        if (Array.isArray(word.aiData.nounForms)) {
-                            for (const nf of word.aiData.nounForms) consider(word, nf?.meaning, 2);
-                        }
-                        if (Array.isArray(word.aiData.adjectiveForms)) {
-                            for (const af of word.aiData.adjectiveForms) consider(word, af?.meaning, 3);
+                        // 🚀 مرحله ۱۰-پ: به‌جای پیمایش زنده‌ی nounForms/adjectiveForms، از لیست از پیش‌ساخته استفاده کن
+                        if (Array.isArray(word.__derivedMeanings)) {
+                            for (const dm of word.__derivedMeanings) {
+                                if (dm.kind === 'noun' || dm.kind === 'adjective') consider(word, dm.meaning, dm.rank);
+                            }
+                        } else {
+                            if (Array.isArray(word.aiData.nounForms)) {
+                                for (const nf of word.aiData.nounForms) consider(word, nf?.meaning, 2);
+                            }
+                            if (Array.isArray(word.aiData.adjectiveForms)) {
+                                for (const af of word.aiData.adjectiveForms) consider(word, af?.meaning, 3);
+                            }
                         }
                     }
                 }
@@ -40582,58 +40901,61 @@ Return a JSON object: {
                 if (!queryHasPersian) {
                     // rank 1: meaning of the searched derived word
                     pushCandidate(word.aiData.derivedWordMeaning, 1);
-                    // rank 2+: meanings of derived forms
-                    if (Array.isArray(word.aiData.nounForms)) {
-                        for (const nf of word.aiData.nounForms) pushCandidate(nf?.meaning, 2);
-                    }
-                    if (Array.isArray(word.aiData.adjectiveForms)) {
-                        for (const af of word.aiData.adjectiveForms) pushCandidate(af?.meaning, 3);
+                    // 🚀 مرحله ۱۰-پ: به‌جای پیمایش زنده، از لیست از پیش‌ساخته استفاده کن
+                    if (Array.isArray(word.__derivedMeanings)) {
+                        for (const dm of word.__derivedMeanings) {
+                            if (dm.kind === 'noun') pushCandidate(dm.meaning, 2);
+                            else if (dm.kind === 'adjective') pushCandidate(dm.meaning, 3);
+                        }
+                    } else {
+                        if (Array.isArray(word.aiData.nounForms)) {
+                            for (const nf of word.aiData.nounForms) pushCandidate(nf?.meaning, 2);
+                        }
+                        if (Array.isArray(word.aiData.adjectiveForms)) {
+                            for (const af of word.aiData.adjectiveForms) pushCandidate(af?.meaning, 3);
+                        }
                     }
                 } else {
                     // جستجوی فارسی: معانی مشتق (اسم، صفت، فعل، خانواده واژه و عبارات) هم جستجو شوند؛ ترم و معنی نمایش = خود مشتق
-                    const getNounDisplayTerm = (nf) => {
-                        if (!nf || typeof nf !== 'object') return '';
-                        if (typeof nf.indefiniteSingular === 'string' && nf.indefiniteSingular.trim()) return nf.indefiniteSingular.trim();
-                        if (typeof nf.common === 'string' && nf.common.trim()) return nf.common.trim();
-                        for (const v of Object.values(nf)) if (typeof v === 'string' && v.trim() && !/[\u0600-\u06FF]/.test(v)) return v.trim();
-                        return '';
-                    };
-                    const getAdjDisplayTerm = (af) => {
-                        if (!af || typeof af !== 'object') return '';
-                        if (typeof af.positive === 'string' && af.positive.trim()) return af.positive.trim();
-                        if (typeof af.common === 'string' && af.common.trim()) return af.common.trim();
-                        for (const v of Object.values(af)) if (typeof v === 'string' && v.trim() && !/[\u0600-\u06FF]/.test(v)) return v.trim();
-                        return '';
-                    };
                     pushCandidate(word.aiData.derivedWordMeaning, 1, word.originalTerm, word.aiData.derivedWordMeaning);
-                    if (Array.isArray(word.aiData.nounForms)) {
-                        for (const nf of word.aiData.nounForms) {
-                            const dt = getNounDisplayTerm(nf);
-                            if (dt) pushCandidate(nf?.meaning, 2, dt, nf?.meaning);
-                            else pushCandidate(nf?.meaning, 2);
+                    // 🚀 مرحله ۱۰-پ: به‌جای پیمایش زنده‌ی nounForms/adjectiveForms/verbConjugations/wordFamily، از لیست از پیش‌ساخته استفاده کن
+                    if (Array.isArray(word.__derivedMeanings)) {
+                        for (const dm of word.__derivedMeanings) {
+                            if (dm.displayTerm) pushCandidate(dm.meaning, dm.rank, dm.displayTerm, dm.meaning);
+                            else pushCandidate(dm.meaning, dm.rank);
                         }
-                    }
-                    if (Array.isArray(word.aiData.adjectiveForms)) {
-                        for (const af of word.aiData.adjectiveForms) {
-                            const dt = getAdjDisplayTerm(af);
-                            if (dt) pushCandidate(af?.meaning, 3, dt, af?.meaning);
-                            else pushCandidate(af?.meaning, 3);
+                    } else {
+                        const getNounDisplayTerm = __derivedNounDisplayTerm;
+                        const getAdjDisplayTerm = __derivedAdjDisplayTerm;
+                        if (Array.isArray(word.aiData.nounForms)) {
+                            for (const nf of word.aiData.nounForms) {
+                                const dt = getNounDisplayTerm(nf);
+                                if (dt) pushCandidate(nf?.meaning, 2, dt, nf?.meaning);
+                                else pushCandidate(nf?.meaning, 2);
+                            }
                         }
-                    }
-                    if (word.aiData.verbConjugations && typeof word.aiData.verbConjugations.verbMeaning === 'string') {
-                        const vinf = word.aiData.verbConjugations?.infinitive;
-                        pushCandidate(word.aiData.verbConjugations.verbMeaning, 2, (typeof vinf === 'string' && vinf.trim()) ? vinf.trim() : word.originalTerm, word.aiData.verbConjugations.verbMeaning);
-                    }
-                    const wf = word.aiData.wordFamily;
-                    if (Array.isArray(wf)) {
-                        for (const entry of wf) {
-                            const s = typeof entry === 'string' ? entry : '';
-                            const colon = s.indexOf(':');
-                            if (colon !== -1) {
-                                const meaningPart = s.slice(0, colon).trim();
-                                const wordPart = s.slice(colon + 1).trim();
-                                if (wordPart) pushCandidate(meaningPart, 2, wordPart, meaningPart);
-                                else pushCandidate(meaningPart, 2);
+                        if (Array.isArray(word.aiData.adjectiveForms)) {
+                            for (const af of word.aiData.adjectiveForms) {
+                                const dt = getAdjDisplayTerm(af);
+                                if (dt) pushCandidate(af?.meaning, 3, dt, af?.meaning);
+                                else pushCandidate(af?.meaning, 3);
+                            }
+                        }
+                        if (word.aiData.verbConjugations && typeof word.aiData.verbConjugations.verbMeaning === 'string') {
+                            const vinf = word.aiData.verbConjugations?.infinitive;
+                            pushCandidate(word.aiData.verbConjugations.verbMeaning, 2, (typeof vinf === 'string' && vinf.trim()) ? vinf.trim() : word.originalTerm, word.aiData.verbConjugations.verbMeaning);
+                        }
+                        const wf = word.aiData.wordFamily;
+                        if (Array.isArray(wf)) {
+                            for (const entry of wf) {
+                                const s = typeof entry === 'string' ? entry : '';
+                                const colon = s.indexOf(':');
+                                if (colon !== -1) {
+                                    const meaningPart = s.slice(0, colon).trim();
+                                    const wordPart = s.slice(colon + 1).trim();
+                                    if (wordPart) pushCandidate(meaningPart, 2, wordPart, meaningPart);
+                                    else pushCandidate(meaningPart, 2);
+                                }
                             }
                         }
                     }
@@ -40753,26 +41075,7 @@ Return a JSON object: {
                         }
                     };
 
-                    const pickDerivedCandidateFromObj = (obj) => {
-                        try {
-                            if (!obj || typeof obj !== 'object') return '';
-                            let candidate = '';
-                            for (const [k, v] of Object.entries(obj)) {
-                                if (k === 'meaning') continue;
-                                if (typeof v !== 'string') continue;
-                                const vv = v.trim();
-                                if (!vv) continue;
-                                const keyLower = String(k).toLowerCase();
-                                const isArticleBase = /^(en|et)\s+/i.test(vv);
-                                const isBaseKey = ((keyLower.includes('indef') && keyLower.includes('sing')) || isArticleBase);
-                                if (isBaseKey) { candidate = vv; break; }
-                                if (!candidate) candidate = vv;
-                            }
-                            return candidate;
-                        } catch (e) {
-                            return '';
-                        }
-                    };
+                    const pickDerivedCandidateFromObj = __vdPickCandidate;
 
                     for (const word of localWordsCache) {
                         if (!word || !word.aiData) continue;
@@ -40786,6 +41089,50 @@ Return a JSON object: {
                             continue;
                         }
 
+                        // 🚀 مرحله ۱۰-ت: به‌جای پیمایش زنده‌ی nounForms/adjectiveForms/wordFamily، از ایندکس از پیش‌ساخته استفاده کن
+                        const vd = word.__vdIndex;
+                        if (vd && Array.isArray(vd.derived) && Array.isArray(vd.wordFamily)) {
+                            for (const entry of vd.derived) {
+                                if (!meaningMatchesQuery(entry.meaning)) continue;
+                                const candidate = entry.candidate;
+                                if (!candidate) continue;
+                                const saved = findSavedWordByTerm(candidate);
+                                if (saved) addWord(saved);
+                                else {
+                                    const rootWord = word.originalTerm || '';
+                                    const cCmp = stripDanishArticles(candidate);
+                                    const wCmp = stripDanishArticles(word.originalTerm);
+                                    if (cCmp && wCmp && cCmp !== wCmp) {
+                                        addVirtual({ term: candidate, wordId: word.id, rootWord: rootWord, derivedMeaning: entry.meaning || '' });
+                                    }
+                                }
+                            }
+
+                            for (const wf of vd.wordFamily) {
+                                if (!meaningMatchesQuery(wf.faPart)) continue;
+                                const daPart = wf.daPart;
+                                const saved = findSavedWordByTerm(daPart);
+                                const realMeaning = (saved && saved.aiData && typeof saved.aiData.translation === 'string' && saved.aiData.translation.trim())
+                                    ? saved.aiData.translation
+                                    : wf.fallbackMeaning;
+
+                                // Avoid relying on wordFamily alone; require corroborated meaning for the specific derived form.
+                                if (!realMeaning || !meaningMatchesQuery(realMeaning)) continue;
+
+                                if (saved) addWord(saved);
+                                else {
+                                    const rootWord = word.originalTerm || '';
+                                    const cCmp = stripDanishArticles(daPart);
+                                    const wCmp = stripDanishArticles(word.originalTerm);
+                                    if (cCmp && wCmp && cCmp !== wCmp) {
+                                        addVirtual({ term: daPart, wordId: word.id, rootWord: rootWord, derivedMeaning: realMeaning || '' });
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        // مسیر قدیمی (fallback) — برای کلماتی که هنوز ایندکس __vdIndex ندارن
                         const nounFormsAny = word.aiData?.nounForms;
                         if (Array.isArray(nounFormsAny)) {
                             for (const nf of nounFormsAny) {
@@ -40891,42 +41238,7 @@ Return a JSON object: {
                                         if (saved && saved.aiData && typeof saved.aiData.translation === 'string' && saved.aiData.translation.trim()) {
                                             return saved.aiData.translation;
                                         }
-
-                                        const tN = normalizeText(daPart);
-                                        const tS = stripDanishArticles(daPart);
-                                        if (!tN && !tS) return '';
-
-                                        const adj = word.aiData?.adjectiveForms;
-                                        if (Array.isArray(adj)) {
-                                            for (const af of adj) {
-                                                if (!af || typeof af !== 'object') continue;
-                                                for (const [k, v] of Object.entries(af)) {
-                                                    if (k === 'meaning') continue;
-                                                    if (typeof v !== 'string') continue;
-                                                    const vN = normalizeText(v);
-                                                    const vS = stripDanishArticles(v);
-                                                    if ((vN && tN && vN === tN) || (vS && tS && vS === tS)) {
-                                                        return (typeof af.meaning === 'string') ? af.meaning : '';
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        const noun = word.aiData?.nounForms;
-                                        if (Array.isArray(noun)) {
-                                            for (const nf of noun) {
-                                                if (!nf || typeof nf !== 'object') continue;
-                                                for (const [k, v] of Object.entries(nf)) {
-                                                    if (k === 'meaning') continue;
-                                                    if (typeof v !== 'string') continue;
-                                                    const vN = normalizeText(v);
-                                                    const vS = stripDanishArticles(v);
-                                                    if ((vN && tN && vN === tN) || (vS && tS && vS === tS)) {
-                                                        return (typeof nf.meaning === 'string') ? nf.meaning : '';
-                                                    }
-                                                }
-                                            }
-                                        }
+                                        return __vdFindOwnFormMeaning(word.aiData, daPart);
                                     } catch (e) {}
                                     return '';
                                 })();
@@ -43634,7 +43946,7 @@ Return a JSON object: {
                 try { saveLocalWordsCache(); } catch (e) { try { scheduleSaveLocalCache(); } catch (e2) {} }
             }
             try { rebuildSearchIndexes(); } catch (e) {}
-            dashboardWordsCache = JSON.parse(JSON.stringify(localWordsCache || []));
+            dashboardWordsCache = Array.isArray(localWordsCache) ? localWordsCache : [];
             dashboardWordsCacheLoadedAt = Date.now();
             saveDashboardCacheToLocal();
             updateAllUI();
@@ -43697,6 +44009,27 @@ Return a JSON object: {
                     console.warn('Offline: skipping Service Worker registration.');
                     return;
                 }
+
+                // BUGFIX (iOS refresh loop): این‌جا باید بدانیم آیا قبل از این
+                // register() اصلاً یک Service Worker از قبل صفحه را کنترل می‌کرده یا
+                // نه. دلیلش: در فعال‌سازیِ اولین باری که یک SW اصلاً نصب می‌شود، خودِ
+                // sw.js داخل «activate» بدون قید‌وشرط self.clients.claim() را صدا
+                // می‌زند تا صفحه‌ی همین لحظه‌ی بازشده را هم بلافاصله کنترل کند — این
+                // کاملاً طبیعی و بی‌خطر است، ولی همین کار controller را از null به SW
+                // تغییر می‌دهد و رویداد controllerchange را شلیک می‌کند. قبلاً پایین
+                // همین تابع، این رویداد همیشه یک window.location.reload() اجرا
+                // می‌کرد — یعنی حتی همین «فعال‌سازی اولیه‌ی کاملاً عادی» هم یک ریلود
+                // غیرضروری ایجاد می‌کرد. روی آیفون، چون iOS برای PWAهای standalone
+                // (و حتی تب‌های عادی سافاری موبایل تحت فشار حافظه) خیلی مکرر پردازش
+                // صفحه را از حافظه خارج می‌کند، هر بار که کاربر اپ را دوباره باز
+                // می‌کند این وضعیت «هنوز هیچ کنترلری نداشتیم» دوباره پیش می‌آید و این
+                // ریلود غیرضروری هر بار تکرار می‌شود — دقیقاً همان رفرش/لودینگ مکرری
+                // که کاربر گزارش کرده. راه‌حل: فقط وقتی از قبل واقعاً یک کنترلر
+                // (نسخه‌ی قبلی) وجود داشته و این کنترلر عوض شده (یعنی یک بروزرسانی
+                // واقعی زیر پای کاربر رخ داده) ریلود کن؛ فعال‌سازی اولیه (null → SW)
+                // هرگز نباید صفحه را ریلود کند.
+                const hadControllerAtLoad = !!navigator.serviceWorker.controller;
+
                 try {
                     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
                         .then(r => {
@@ -43725,24 +44058,37 @@ Return a JSON object: {
                 }
 
                 try {
-                    // BUGFIX: this used to be a plain local variable, which resets to
-                    // false on every reload — so if the SW keeps reporting a "new"
-                    // controller (flaky mobile network re-triggering the update check,
-                    // multiple tabs racing for control, etc.), the page kept calling
-                    // reload() on itself over and over. Since this is a deliberate
-                    // reload() and not a real crash, it leaves zero trace in the OS
-                    // crash/diagnostic logs — it just looks like the app randomly
-                    // resets back to the splash screen. Persisting the guard in
-                    // sessionStorage makes it survive across those reloads, so it can
-                    // only happen once per browsing session instead of looping.
+                    // BUGFIX (iOS refresh loop, part 2): قبلاً این گارد در
+                    // sessionStorage نگه داشته می‌شد تا ریلود «فقط یک‌بار در هر
+                    // session» رخ دهد. مشکل: روی آیفون، وقتی iOS پردازش PWA/تب را
+                    // به‌خاطر فشار حافظه از بین می‌برد و کاربر دوباره بازش می‌کند،
+                    // این از نگاه iOS دقیقاً یک session/پردازش تازه است — یعنی
+                    // sessionStorage هم از صفر شروع می‌شود و گارد دوباره صفر می‌شود،
+                    // پس دوباره اجازه‌ی یک ریلود جدید صادر می‌شود. چون این چرخه‌ی
+                    // «باز شدن دوباره ← تخلیه‌ی حافظه توسط iOS» می‌تواند مکرر و
+                    // پشت‌سرهم رخ دهد، این گارد در عمل تقریباً هیچ محافظتی روی آیفون
+                    // ایجاد نمی‌کرد. حالا از localStorage (که با تخلیه‌ی پردازش پاک
+                    // نمی‌شود) به همراه یک بازه‌ی زمانی خنک‌سازی (cooldown) استفاده
+                    // می‌کنیم: در هر بازه‌ی ۳۰ ثانیه‌ای حداکثر یک ریلودِ ناشیِ از
+                    // controllerchange مجاز است — و مهم‌تر از آن، طبق توضیح بالا،
+                    // اصلاً وقتی از قبل کنترلری وجود نداشته (فعال‌سازی اولیه) هیچ
+                    // ریلودی صادر نمی‌شود.
                     navigator.serviceWorker.addEventListener('controllerchange', () => {
-                        let alreadyReloaded = false;
-                        try { alreadyReloaded = sessionStorage.getItem('facit_sw_reloaded') === '1'; } catch (e) {}
-                        if (alreadyReloaded) return;
-                        try { sessionStorage.setItem('facit_sw_reloaded', '1'); } catch (e) {}
+                        if (!hadControllerAtLoad) {
+                            // فعال‌سازی اولیه‌ی کاملاً عادی (اولین باری که SW این
+                            // صفحه را کنترل می‌کند) — نیازی به ریلود نیست، SW از همین
+                            // الان به بعد بی‌سروصدا کنترل درخواست‌ها را به دست می‌گیرد.
+                            return;
+                        }
+                        const RELOAD_COOLDOWN_MS = 30 * 1000;
+                        let lastReloadAt = 0;
+                        try { lastReloadAt = parseInt(localStorage.getItem('facit_sw_last_reload_at') || '0', 10) || 0; } catch (e) {}
+                        if (Date.now() - lastReloadAt < RELOAD_COOLDOWN_MS) return;
+                        try { localStorage.setItem('facit_sw_last_reload_at', String(Date.now())); } catch (e) {}
                         window.location.reload();
                     });
                 } catch (e) {}
+
             });
         }
 
