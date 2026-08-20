@@ -15093,12 +15093,8 @@ Conversation History:
 									if (deckRenderMode === 'cognates') {
 										currentCognatesGroups = buildVerbAffixGroupsFromWords(currentFilteredWords);
 										const deckListEl = document.getElementById('deck-list');
-										const prevScroll = mainContainer.scrollTop;
-										renderedWordCount = 0;
-										isRenderingBatch = false;
-										if (deckListEl) deckListEl.innerHTML = '';
-										renderWordBatch();
-										mainContainer.scrollTop = prevScroll;
+										_lastVirtualRange = null;
+										renderVirtualDeckItems();
 										if (cognatesModalState && cognatesModalState.rootId) {
 											renderCognatesModal();
 										}
@@ -32263,6 +32259,12 @@ Example:
         let renderedWordCount = 0;
         const RENDER_BATCH_SIZE = 50;
         let isRenderingBatch = false;
+
+        // 🚀 Virtual Scroll: فقط آیتم‌های قابل مشاهده + بافر رندر می‌شوند
+        // بجای ۲۰,۰۰۰ نود DOM، حداکثر ~۴۰ نود در هر لحظه
+        const VIRTUAL_ITEM_HEIGHT = 88; // ارتفاع تقریبی هر آیتم (px)
+        const VIRTUAL_BUFFER = 8; // تعداد آیتم‌های اضافی بالا و پایین viewport
+        let _lastVirtualRange = null; // { start, end } آخرین محدوده رندر شده
         let includeDerivedInDeckCount = false;
         let includeCognatesInDeckCount = false;
         let includeSpellingInDeckCount = false;
@@ -34248,8 +34250,8 @@ Example:
 					const translation = w.aiData?.translation ? String(w.aiData.translation).toLowerCase() : '';
 					if (translation && translation.includes(searchTerm)) return true;
 
-					if (displayTermLower.split(/\s+/).some(part => part.includes(searchTerm))) return true;
-					if (originalLower.split(/\s+/).some(part => part.includes(searchTerm))) return true;
+					if (displayTermLower.split(/\\s+/).some(part => part.includes(searchTerm))) return true;
+					if (originalLower.split(/\\s+/).some(part => part.includes(searchTerm))) return true;
 
 					return false;
 				});
@@ -34271,13 +34273,7 @@ Example:
 			currentMeaningGroups = isMeaningMode ? buildMeaningGroupsFromWords(filteredWords) : [];
 			renderedWordCount = 0;
 			isRenderingBatch = false;
-			
-			// Preserve scroll position if we are just updating the same view (e.g. background sync)
-			const currentScrollTop = mainContainer.scrollTop;
-			deckList.innerHTML = '';
-			if (deckRenderMode !== prevRenderMode) {
-				mainContainer.scrollTop = 0;
-			}
+			_lastVirtualRange = null;
 
 			if (deckRenderMode === 'cognates') {
 				updateDeckCognatesCountBadge(currentCognatesGroups);
@@ -34292,39 +34288,67 @@ Example:
 				updateDeckWordCountBadge(filteredWords);
 			}
 
-			renderWordBatch();
-			
-			// Restore scroll position after batch renders if we stayed in the same mode
-			if (deckRenderMode === prevRenderMode && currentScrollTop > 0) {
-				requestAnimationFrame(() => {
-					mainContainer.scrollTop = currentScrollTop;
-				});
+			const sourceList = _getDeckSourceList();
+			deckList.innerHTML = '';
+
+			if (sourceList.length === 0) {
+				deckList.style.position = '';
+				deckList.style.height = '';
+				deckList.innerHTML = `<p class="text-center text-gray-500 dark:text-gray-400 mt-8">${deckNeedsUpdateMode ? 'هیچ واژه\u200cای که نیاز به بروزرسانی داشته باشد پیدا نشد.' : 'هیچ کلمه ای یافت نشد.'}</p>`;
+				document.getElementById('deck-loader').classList.add('hidden');
+				if (deckRenderMode !== prevRenderMode) mainContainer.scrollTop = 0;
+				return;
 			}
+
+			deckList.style.position = 'relative';
+			deckList.style.height = (sourceList.length * VIRTUAL_ITEM_HEIGHT) + 'px';
+			document.getElementById('deck-loader').classList.add('hidden');
+
+			if (deckRenderMode !== prevRenderMode) {
+				mainContainer.scrollTop = 0;
+			}
+
+			renderVirtualDeckItems();
         }
 
-        function renderWordBatch() {
-            if (isRenderingBatch) return;
-			const sourceList = (deckRenderMode === 'cognates') ? currentCognatesGroups : ((deckRenderMode === 'spelling') ? currentSpellingGroups : ((deckRenderMode === 'meaning') ? currentMeaningGroups : currentFilteredWords));
-            if (renderedWordCount >= sourceList.length) {
-                document.getElementById('deck-loader').classList.add('hidden');
-                return;
-            }
+		function _getDeckSourceList() {
+			return (deckRenderMode === 'cognates') ? currentCognatesGroups
+				: ((deckRenderMode === 'spelling') ? currentSpellingGroups
+				: ((deckRenderMode === 'meaning') ? currentMeaningGroups
+				: currentFilteredWords));
+		}
 
-			isRenderingBatch = true;
-			document.getElementById('deck-loader').classList.remove('hidden');
-
+		// 🚀 Virtual Scroll Renderer
+		function renderVirtualDeckItems() {
 			const deckList = document.getElementById('deck-list');
+			if (!deckList) return;
+			const sourceList = _getDeckSourceList();
+			if (sourceList.length === 0) return;
+
+			const scrollOffset = mainContainer.scrollTop;
+			const deckOffsetInMain = deckList.offsetTop || 0;
+			const deckScrollTop = Math.max(0, scrollOffset - deckOffsetInMain);
+			const viewportHeight = mainContainer.clientHeight;
+
+			const startIdx = Math.max(0, Math.floor(deckScrollTop / VIRTUAL_ITEM_HEIGHT) - VIRTUAL_BUFFER);
+			const endIdx = Math.min(sourceList.length, Math.ceil((deckScrollTop + viewportHeight) / VIRTUAL_ITEM_HEIGHT) + VIRTUAL_BUFFER);
+
+			if (_lastVirtualRange && _lastVirtualRange.start === startIdx && _lastVirtualRange.end === endIdx) return;
+			_lastVirtualRange = { start: startIdx, end: endIdx };
+
 			const fragment = document.createDocumentFragment();
-			const itemsToRender = sourceList.slice(renderedWordCount, renderedWordCount + RENDER_BATCH_SIZE);
 
 			if (deckRenderMode === 'cognates' || deckRenderMode === 'spelling' || deckRenderMode === 'meaning') {
-				itemsToRender.forEach(group => {
+				for (let i = startIdx; i < endIdx; i++) {
+					const group = sourceList[i];
+					if (!group) continue;
 					const div = document.createElement('div');
 					div.dataset.rootId = group.rootId;
 					div.dataset.groupType = deckRenderMode;
 					div.className = `cognates-group-item bg-white dark:bg-gray-700 p-4 rounded-lg shadow-sm cursor-pointer relative${group?.isFullyHidden ? ' opacity-50' : ''}`;
+					div.style.cssText = `position:absolute; top:${i * VIRTUAL_ITEM_HEIGHT}px; left:0; right:0; height:${VIRTUAL_ITEM_HEIGHT - 12}px; box-sizing:border-box;`;
 					const groupCount = (Number(group?.mainVisibleCount) || 0) + 1;
- 					const preview = Array.isArray(group.preview) && group.preview.length > 0 ? group.preview.join(' • ') : '';
+ 					const preview = Array.isArray(group.preview) && group.preview.length > 0 ? group.preview.join(' \u2022 ') : '';
  					div.innerHTML = `
 						<span class="group-count-badge absolute right-4 text-xs px-2 py-1 rounded-full" style="top:50%; transform:translateY(-50%);">${groupCount}</span>
 						<div class="text-left pr-14 min-w-0">
@@ -34332,9 +34356,11 @@ Example:
 							${preview ? `<p class="text-lg text-gray-600 dark:text-gray-300 mt-0.5 break-words text-content-ltr">${escapeHtml(preview)}</p>` : ''}
 						</div>`;
 					fragment.appendChild(div);
-				});
+				}
 			} else {
-				itemsToRender.forEach(word => {
+				for (let i = startIdx; i < endIdx; i++) {
+					const word = sourceList[i];
+					if (!word) continue;
 					const div = document.createElement('div');
 					div.dataset.id = word.id;
 
@@ -34346,6 +34372,7 @@ Example:
                         baseClass += " bg-white dark:bg-gray-700";
                     }
 					div.className = baseClass;
+					div.style.cssText = `position:absolute; top:${i * VIRTUAL_ITEM_HEIGHT}px; left:0; right:0; height:${VIRTUAL_ITEM_HEIGHT - 12}px; box-sizing:border-box;`;
 
 					let termLabel = word.aiData?.analysisOf || word.aiData?.baseForm || word.originalTerm;
 					try {
@@ -34356,29 +34383,26 @@ Example:
 					const meaningLabel = word.aiData ? word.aiData.translation : '...';
 
                     const warningIcon = '';
-
                     const termClass = incomplete ? "font-bold text-lg text-yellow-900 dark:text-yellow-100" : "font-bold text-lg";
                     const meaningClass = incomplete ? "text-yellow-800 dark:text-yellow-200" : "text-gray-600 dark:text-gray-300";
 
 					div.innerHTML = `${warningIcon}<div class="text-right flex-grow"><p class="${termClass}">${escapeHtml(termLabel)}</p><p class="${meaningClass}">${escapeHtml(meaningLabel)}</p></div><button type="button" data-id="${word.id}" class="delete-word-btn relative z-10 text-gray-400 hover:text-red-500 ml-4"><i class="fa fa-trash"></i></button>`;
 					fragment.appendChild(div);
-				});
+				}
 			}
 
+			deckList.innerHTML = '';
+			deckList.style.height = (sourceList.length * VIRTUAL_ITEM_HEIGHT) + 'px';
 			deckList.appendChild(fragment);
-			renderedWordCount += itemsToRender.length;
+			renderedWordCount = endIdx;
+		}
 
-			if (renderedWordCount >= sourceList.length) {
-				document.getElementById('deck-loader').classList.add('hidden');
-			}
-
-			if (sourceList.length === 0) {
-				deckList.innerHTML = `<p class="text-center text-gray-500 dark:text-gray-400 mt-8">${deckNeedsUpdateMode ? 'هیچ واژه‌ای که نیاز به بروزرسانی داشته باشد پیدا نشد.' : 'هیچ کلمه ای یافت نشد.'}</p>`;
-				document.getElementById('deck-loader').classList.add('hidden');
-			}
-
-			isRenderingBatch = false;
+		// backward compatibility wrapper
+        function renderWordBatch() {
+			_lastVirtualRange = null;
+			renderVirtualDeckItems();
         }
+
 
 		function openCognatesModalByRootId(rootId) {
 			const group = (Array.isArray(currentCognatesGroups) ? currentCognatesGroups : []).find(g => g && g.rootId === rootId);
@@ -34519,12 +34543,8 @@ Example:
 								try {
 									if (deckRenderMode === 'cognates') {
 										const deckListEl = document.getElementById('deck-list');
-										const prevScroll = mainContainer.scrollTop;
-										renderedWordCount = 0;
-										isRenderingBatch = false;
-										if (deckListEl) deckListEl.innerHTML = '';
-										renderWordBatch();
-										mainContainer.scrollTop = prevScroll;
+										_lastVirtualRange = null;
+										renderVirtualDeckItems();
 									}
 								} catch (e) {}
 								renderCognatesModal();
@@ -34696,12 +34716,8 @@ Example:
 								try {
 									if (deckRenderMode === 'spelling') {
 										const deckListEl = document.getElementById('deck-list');
-										const prevScroll = mainContainer.scrollTop;
-										renderedWordCount = 0;
-										isRenderingBatch = false;
-										if (deckListEl) deckListEl.innerHTML = '';
-										renderWordBatch();
-										mainContainer.scrollTop = prevScroll;
+										_lastVirtualRange = null;
+										renderVirtualDeckItems();
 									}
 								} catch (e) {}
 								renderSpellingModal();
@@ -34859,12 +34875,8 @@ Example:
 								try {
 									if (deckRenderMode === 'meaning') {
 										const deckListEl = document.getElementById('deck-list');
-										const prevScroll = mainContainer.scrollTop;
-										renderedWordCount = 0;
-										isRenderingBatch = false;
-										if (deckListEl) deckListEl.innerHTML = '';
-										renderWordBatch();
-										mainContainer.scrollTop = prevScroll;
+										_lastVirtualRange = null;
+										renderVirtualDeckItems();
 										updateDeckMeaningCountBadge(currentMeaningGroups);
 									}
 								} catch (e) {}
@@ -35109,10 +35121,8 @@ Example:
                 _scrollRafPending = false;
                 const wordsViewEl = document.getElementById('words-view');
                 if (!document.getElementById('deck-tab').classList.contains('active') || (wordsViewEl && wordsViewEl.classList.contains('hidden'))) return;
-                const { scrollTop, scrollHeight, clientHeight } = mainContainer;
-                if (scrollHeight - scrollTop - clientHeight < 300) {
-                    renderWordBatch();
-                }
+                // 🚀 Virtual Scroll: آیتم‌های قابل مشاهده رو آپدیت کن
+                renderVirtualDeckItems();
             });
         }, { passive: true });
 
