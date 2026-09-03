@@ -15376,13 +15376,16 @@ Conversation History:
 							}
 							if (Array.isArray(settings.disabledAiModels)) {
 								try {
-									const disabled = settings.disabledAiModels;
-									if (currentAiModel !== 'hybrid' && disabled.includes(currentAiModel)) {
-										const onlyEnabled = aiModels.find(m => m.id !== 'hybrid' && !disabled.includes(m.id));
-										currentAiModel = onlyEnabled?.id || 'hybrid';
-										try { localStorage.setItem('preferred_model', currentAiModel); } catch (e2) {}
-										try { updateAiModelDisplay(); } catch (e3) {}
-									}
+									// NOTE: a model's Auto-mode toggle being off only means it's
+									// excluded as a candidate when 'Auto' is selected — it must
+									// NOT undo an explicit, individual model pick. Previously this
+									// reverted currentAiModel to another model (or 'hybrid') simply
+									// because the just-picked model was still in disabledAiModels,
+									// which silently discarded the user's tap on a toggled-off model.
+									// A remote change to disabledAiModels can still leave 'Auto' with
+									// only one usable model — reconcile so the badge doesn't get
+									// stuck on "Auto" after a settings sync from another device.
+									try { if (typeof reconcileAutoModelSelection === 'function') reconcileAutoModelSelection(); } catch (e4) {}
 								} catch (e) {}
 							}
 						} catch (e) {}
@@ -16545,6 +16548,7 @@ Conversation History:
 
             const usedModel = note.usedModel || 'AI';
             const friendlyModelName = {
+                'gemini-3.8-flash': 'Gemini 3.8 Flash',
                 'gemini-3.7-flash': 'Gemini 3.7 Flash',
                 'gemini-3.6-flash': 'Gemini 3.6 Flash',
                 'gemini-3.5-flash': 'Gemini 3.5 Flash',
@@ -17537,6 +17541,7 @@ Rules:
                 aiResult.className = "p-6 rounded-2xl shadow-lg bg-white dark:bg-gray-700 relative";
 
                 const modelDisplayName = {
+                    'gemini-3.8-flash': 'Gemini 3.8 Flash',
                     'gemini-3.7-flash': 'Gemini 3.7 Flash',
                     'gemini-3.6-flash': 'Gemini 3.6 Flash',
                     'gemini-3.5-flash': 'Gemini 3.5 Flash',
@@ -18817,6 +18822,7 @@ Output:
                     }
                     modelName = modelName || 'AI';
                     const friendlyModelName = {
+                        'gemini-3.8-flash': 'Gemini 3.8 Flash',
                         'gemini-3.7-flash': 'Gemini 3.7 Flash',
                         'gemini-3.6-flash': 'Gemini 3.6 Flash',
                         'gemini-3.5-flash': 'Gemini 3.5 Flash',
@@ -19021,6 +19027,7 @@ Output:
                 // 5. Render result - Use explicit successfulModel
                 const usedModel = aiResponse.usedModel || 'AI';
                 const friendlyModelName = {
+                    'gemini-3.8-flash': 'Gemini 3.8 Flash',
                     'gemini-3.7-flash': 'Gemini 3.7 Flash',
                     'gemini-3.6-flash': 'Gemini 3.6 Flash',
                     'gemini-3.5-flash': 'Gemini 3.5 Flash',
@@ -19075,7 +19082,7 @@ Output:
 
                          // Priority for JSON/Summary: Flash (Fast & Good for JSON) -> Pro -> 3
                          // This mirrors the 'speed' strategy as summarization is a background utility task
-                         const preferredModels = window.APIUtils?.MODELS_WEAK_TO_STRONG || ['gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-2.5-pro', 'gemini-3.1-pro-preview'];
+                         const preferredModels = window.APIUtils?.MODELS_WEAK_TO_STRONG || ['gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-3.8-flash', 'gemini-2.5-pro', 'gemini-3.1-pro-preview'];
                          let modelsToTry = preferredModels.filter(m => !disabledModels.includes(m));
 
                          // Emergency fallback
@@ -26762,6 +26769,7 @@ Answer with ONLY a JSON object: {"valid": true} if this is a genuine, common pre
 
             // نمایش مدل AI استفاده شده
             const modelDisplayName = {
+                'gemini-3.8-flash': 'Gemini 3.8 Flash',
                 'gemini-3.7-flash': 'Gemini 3.7 Flash',
                 'gemini-3.6-flash': 'Gemini 3.6 Flash',
                 'gemini-3.5-flash': 'Gemini 3.5 Flash',
@@ -41581,9 +41589,10 @@ Return ONLY the word/phrase itself. Nothing else.`;
         const closeAiModelModalBtn = document.getElementById('close-ai-model-modal-btn');
         const aiModelOptionsContainer = document.getElementById('ai-model-options-container');
 
-        // AI Model Settings — Updated August 2026
+        // AI Model Settings — Updated September 2026
         // Only models confirmed active by Google. 2.0-flash/1.5-* are shut down.
         const aiModels = [
+             { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
              { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash' },
              { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash' },
              { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash' },
@@ -41641,6 +41650,33 @@ Return ONLY the word/phrase itself. Nothing else.`;
              const model = aiModels.find(m => m.id === currentAiModel) || { name: currentAiModel };
              if (currentAiModelDisplay) currentAiModelDisplay.textContent = model.name;
         }
+
+        // Real (non-'hybrid') models the user hasn't disabled.
+        function getEnabledAiModels() {
+             const disabledModels = JSON.parse(localStorage.getItem('disabled_ai_models') || '[]');
+             return aiModels.filter(m => m.id !== 'hybrid' && !disabledModels.includes(m.id));
+        }
+
+        // 'Auto' only makes sense when there's more than one model to choose between.
+        // If the user is on 'Auto' but has disabled everything except one model, fall
+        // back to that single model so the badge and the selection modal always agree.
+        // IMPORTANT: this must run right away on load (not only when the modal is
+        // opened), otherwise the badge can keep showing "Auto" after a reload even
+        // though — as soon as the modal is opened — only one model turns out to be
+        // enabled and gets auto-selected. Without this, the badge and the real
+        // selection silently drift apart.
+        function reconcileAutoModelSelection() {
+             const enabledModels = getEnabledAiModels();
+             const isAutoDisabled = enabledModels.length <= 1;
+             if (currentAiModel === 'hybrid' && isAutoDisabled && enabledModels[0]) {
+                 currentAiModel = enabledModels[0].id;
+                 try { localStorage.setItem('preferred_model', currentAiModel); } catch {}
+                 updateAiModelDisplay();
+             }
+             return isAutoDisabled;
+        }
+
+        reconcileAutoModelSelection();
         updateAiModelDisplay();
 
         if (aiModelBtn) {
@@ -41651,20 +41687,8 @@ Return ONLY the word/phrase itself. Nothing else.`;
         }
 
         function renderAiModelOptions() {
+             const isAutoDisabled = reconcileAutoModelSelection();
              const disabledModels = JSON.parse(localStorage.getItem('disabled_ai_models') || '[]');
-
-             // Count enabled models (excluding 'hybrid')
-             const enabledModelsCount = aiModels.filter(m => m.id !== 'hybrid' && !disabledModels.includes(m.id)).length;
-             const isAutoDisabled = enabledModelsCount <= 1;
-
-             if (currentAiModel === 'hybrid' && isAutoDisabled) {
-                 const onlyEnabled = aiModels.find(m => m.id !== 'hybrid' && !disabledModels.includes(m.id));
-                 if (onlyEnabled?.id) {
-                     currentAiModel = onlyEnabled.id;
-                     try { localStorage.setItem('preferred_model', currentAiModel); } catch {}
-                     updateAiModelDisplay();
-                 }
-             }
 
              aiModelOptionsContainer.innerHTML = aiModels.map(model => {
                  const isDisabled = disabledModels.includes(model.id);
@@ -41913,6 +41937,7 @@ Return a JSON object: {
                 aiResult.className = "p-6 rounded-2xl shadow-lg bg-white dark:bg-gray-700 relative";
 
                 const modelDisplayName = {
+                    'gemini-3.8-flash': 'Gemini 3.8 Flash',
                     'gemini-3.7-flash': 'Gemini 3.7 Flash',
                     'gemini-3.6-flash': 'Gemini 3.6 Flash',
                     'gemini-3.5-flash': 'Gemini 3.5 Flash',
@@ -42409,6 +42434,7 @@ Return a JSON object: {
             const { translation, explanation, alternatives, usedModelName } = data;
 
             const modelDisplayName = {
+                'gemini-3.8-flash': 'Gemini 3.8 Flash',
                 'gemini-3.7-flash': 'Gemini 3.7 Flash',
                 'gemini-3.6-flash': 'Gemini 3.6 Flash',
                 'gemini-3.5-flash': 'Gemini 3.5 Flash',
